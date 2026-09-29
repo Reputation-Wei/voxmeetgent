@@ -1,5 +1,7 @@
 # MeetAgent
 
+[English](README.en.md) | 中文
+
 MeetAgent 是一款本地优先的多语言会议助手：在 Apple Silicon Mac 上使用本机 Whisper 转写会议，持续保存原始音频和逐字稿；可选连接 Gemini Live，让 Agent 持续倾听，并且只在被明确点名提问时回答。项目也提供本机 Web GUI，以及 Omarchy / Quickshell 状态栏插件。
 
 > 开会前请告知与会者正在录音和转写，并取得必要同意。只有在另外明确授权后，MeetAgent 才会把整场音频发送到 Gemini Live；会后把逐字稿发送给 Gemini 生成纪要也是单独选择，默认关闭。
