@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>MeetAgent</title>
+  <style>
+    :root{font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:light dark;--bg:#f4f6fa;--card:#fff;--ink:#182230;--muted:#667085;--line:#e4e7ec;--accent:#2359d6;--red:#b42318}
+    @media(prefers-color-scheme:dark){:root{--bg:#10151d;--card:#18212d;--ink:#edf2f8;--muted:#a4afbd;--line:#303b49;--accent:#86aaff;--red:#ff938b}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink)}header{padding:18px max(20px,calc((100vw - 1180px)/2));background:var(--card);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}h1{font-size:1.25rem;margin:0}.layout{max-width:1180px;margin:24px auto;padding:0 18px;display:grid;grid-template-columns:320px 1fr;gap:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}.status{font-weight:700}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#98a2b3;margin-right:8px}.dot.recording{background:#12b76a}.dot.error{background:#f04438}label{display:block;font-size:.9rem;font-weight:600;margin:12px 0 5px}input,select,button{font:inherit}input[type=text],select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink)}input[type=checkbox]{margin-right:8px}button{border:0;border-radius:8px;padding:10px 14px;background:var(--accent);color:white;font-weight:650;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.stop{background:var(--red)}.row{display:flex;gap:8px;flex-wrap:wrap}.hint,.muted{color:var(--muted);font-size:.88rem}.consent{padding:10px;background:color-mix(in srgb,#f79009 12%,var(--card));border-radius:8px;font-weight:500}.transcript{height:min(64vh,720px);overflow:auto}.entry{padding:12px 2px;border-bottom:1px solid var(--line)}.entry time{color:var(--muted);font-variant-numeric:tabular-nums;margin-right:8px}.entry strong{color:var(--accent);margin-right:8px}.entry button{font-size:.8rem;padding:4px 8px;margin-left:8px}.files button{background:transparent;color:var(--accent);border:1px solid var(--line)}.banner{padding:10px 12px;border-radius:8px;background:color-mix(in srgb,#f04438 12%,var(--card));color:var(--red);margin-top:12px;display:none}.agent{white-space:pre-wrap}.small{font-size:.8rem}.end{text-align:right}@media(max-width:760px){.layout{grid-template-columns:1fr}.transcript{height:50vh}}
+  </style>
+</head>
+<body>
+<header><h1>MeetAgent · 本地会议助手</h1><span id="connection" class="muted">正在连接…</span></header>
+<main class="layout">
+  <section>
+    <div class="card">
+      <div><span id="status-dot" class="dot"></span><span id="status" class="status">空闲</span></div>
+      <div id="elapsed" class="muted">00:00</div>
+      <label for="output">会议文件夹</label><input id="output" type="text" value="~/Meetings" autocomplete="off">
+      <label for="language">主要发言语言</label><select id="language"><option value="auto">自动检测 / 混合语言</option><option value="zh">中文</option><option value="en">English</option><option value="de">Deutsch</option></select>
+      <label for="summary-language">纪要语言</label><select id="summary-language"><option value="zh">中文</option><option value="en">English</option><option value="de">Deutsch</option></select>
+      <label class="consent"><input id="live" type="checkbox">启用 Gemini Live 实时语音回答</label>
+      <label id="consent-wrap" class="consent" style="display:none"><input id="consent" type="checkbox">我已告知与会者：整场麦克风音频会发送给 Gemini</label>
+      <label class="consent"><input id="summary-upload" type="checkbox">会后将逐字稿与 Agent 回答发送给 Gemini 生成纪要（默认仅本地生成）</label>
+      <div class="row" style="margin-top:14px"><button id="start">开始本地录音</button><button id="stop" class="stop" disabled>结束会议并保存</button></div>
+      <div id="error" class="banner" role="alert"></div>
+      <p class="hint">原始 WAV 和逐字稿写入本机文件夹。Gemini Live 只有在启用并明确同意后才接收音频。</p>
+    </div>
+    <div class="card"><b>文件</b><p class="muted">会议结束后可打开音频、逐字稿与纪要。</p><div class="row files"><button data-file="audio">播放/下载 WAV</button><button data-file="transcript">打开 TXT</button><button data-file="jsonl">打开 JSONL</button><button data-file="summary">打开纪要</button></div><div id="audio-player"></div></div>
+  </section>
+  <section>
+    <div class="card transcript"><div class="row" style="justify-content:space-between"><b>实时逐字稿</b><span id="save-state" class="muted">尚未开始</span></div><div class="end"><button id="undo-speaker" class="small" disabled>撤销最近说话人修正</button></div><div id="entries" class="muted" style="margin-top:10px">开始会议后，识别内容会显示在这里。</div></div>
+    <div class="card"><b>Agent 活动</b><p id="agent" class="agent muted">静默待命</p><div id="live-state" class="small muted"></div></div>
+  </section>
+</main>
+<script>
+let token='', meetingId='', socket=null, elapsedTimer=null;
+const $=id=>document.getElementById(id);
+const labels={idle:'空闲',recording:'录制中',stopping:'正在停止并保存',stopped:'已保存',error:'发生错误'};
+function showError(message){$('error').textContent=message||'';$('error').style.display=message?'block':'none'}
+async function api(path,options={}){const response=await fetch(path,{...options,headers:{'Content-Type':'application/json','X-MeetAgent-Token':token,...options.headers}});let body={};try{body=await response.json()}catch{}if(!response.ok)throw new Error(body.detail||`HTTP ${response.status}`);return body}
+function updateStatus(s){$('status').textContent=labels[s.state]||s.state;$('status-dot').className='dot '+(s.state==='recording'?'recording':s.state==='error'?'error':'');$('stop').disabled=!['recording','stopping'].includes(s.state);$('start').disabled=['recording','stopping'].includes(s.state);$('save-state').textContent=s.state==='recording'?'音频持续写入本地 WAV':s.state==='stopped'?'WAV、TXT、JSONL 已保存':s.state==='error'?'请检查错误详情':'尚未开始';$('live-state').textContent=s.live?(s.live_connected===false?'Gemini Live 已断开，继续本地保存':'Gemini Live 模式已启用'):'本地模式：不上传音频';if(s.error)showError(s.error);else if(s.state!=='error')showError('');meetingId=s.meeting_id||meetingId;if(s.elapsed_seconds!==undefined)$('elapsed').textContent=`${String(Math.floor(s.elapsed_seconds/60)).padStart(2,'0')}:${String(s.elapsed_seconds%60).padStart(2,'0')}`}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function renderEntries(items,replace=false){const root=$('entries');if(replace)root.innerHTML='';if(!items.length&&replace){root.textContent='暂无识别到的发言。';root.className='muted';return}root.className='';for(const e of items){const row=document.createElement('div');row.className='entry';row.innerHTML=`<time>${escapeHtml(e.time||'--:--')}</time><strong>${escapeHtml(e.speaker||'说话人未知')}</strong><span>${escapeHtml(e.text||'')}</span>${e.speaker==='Agent'?'':'<button data-correct="1" aria-label="修正说话人">修正</button>'}`;const correct=row.querySelector('button');if(correct)correct.onclick=async()=>{const name=prompt('输入正确的说话人姓名',e.speaker||'');if(!name)return;try{await api(`/api/meetings/${encodeURIComponent(meetingId)}/speaker`,{method:'PATCH',body:JSON.stringify({timestamp:e.timestamp,name})});$('undo-speaker').disabled=false;await loadTranscript()}catch(err){showError(err.message)}};root.appendChild(row)}root.scrollTop=root.scrollHeight}
+async function loadTranscript(){if(!meetingId)return;const r=await api(`/api/meetings/${encodeURIComponent(meetingId)}/transcript`);renderEntries(r.entries,true)}
+function connectEvents(){if(socket)socket.close();const scheme=location.protocol==='https:'?'wss':'ws';socket=new WebSocket(`${scheme}://${location.host}/api/events?token=${encodeURIComponent(token)}`);socket.onopen=()=>{$('connection').textContent='本机服务已连接';$('connection').style.color=''};socket.onclose=()=>{$('connection').textContent='连接中断，正在恢复…';setTimeout(connectEvents,1000)};socket.onerror=()=>socket.close();socket.onmessage=event=>{const m=JSON.parse(event.data);if(m.type==='status')updateStatus(m.data);if(m.type==='transcript_append')renderEntries(m.entries);if(m.type==='transcript_reset')renderEntries(m.entries,true);if(m.type==='summary_ready')$('agent').textContent='会议已结束，纪要已生成或已保存本地 fallback。'}}}
+$('live').onchange=()=>{$('consent-wrap').style.display=$('live').checked?'block':'none';$('start').textContent=$('live').checked?'启用 Gemini Live 并开始':'开始本地录音'};
+$('start').onclick=async()=>{showError('');try{if($('live').checked&&!$('consent').checked)throw new Error('启用 Live 前，请确认与会者已同意整场音频上传。');const r=await api('/api/meetings',{method:'POST',body:JSON.stringify({output_dir:$('output').value,language:$('language').value,summary_language:$('summary-language').value,live:$('live').checked,consent_to_stream:$('consent').checked,consent_to_summary_upload:$('summary-upload').checked})});meetingId=r.meeting_id;$('agent').textContent='会议启动中…';renderEntries([],true)}catch(err){showError(err.message)}};
+$('stop').onclick=async()=>{showError('');try{await api(`/api/meetings/${encodeURIComponent(meetingId)}/stop`,{method:'POST'});$('agent').textContent='正在 flush 音频和逐字稿，并生成会后纪要…'}catch(err){showError(err.message)}};
+$('undo-speaker').onclick=async()=>{try{await api(`/api/meetings/${encodeURIComponent(meetingId)}/speaker/undo`,{method:'POST'});$('undo-speaker').disabled=true;await loadTranscript()}catch(err){showError(err.message)}};
+document.querySelectorAll('[data-file]').forEach(button=>button.onclick=async()=>{if(!meetingId){showError('先开始一场会议。');return}try{const r=await fetch(`/api/meetings/${encodeURIComponent(meetingId)}/files/${button.dataset.file}`,{headers:{'X-MeetAgent-Token':token}});if(!r.ok)throw new Error((await r.json()).detail||'文件尚未生成');const blob=await r.blob(),url=URL.createObjectURL(blob);if(button.dataset.file==='audio'){$('audio-player').innerHTML='';const audio=document.createElement('audio');audio.controls=true;audio.src=url;$('audio-player').append(audio);await audio.play().catch(()=>{})}else window.open(url,'_blank','noopener');setTimeout(()=>URL.revokeObjectURL(url),60000)}catch(err){showError(err.message)}});
+$('live-state').textContent='连接本机控制服务…';
+(async()=>{try{token=(await fetch('/api/bootstrap').then(r=>r.json())).token;const s=await api('/api/status');updateStatus(s);if(s.meeting_id){meetingId=s.meeting_id;await loadTranscript()}connectEvents()}catch(err){showError(err.message);$('connection').textContent='本机服务连接失败'}})();
+</script>
+</body>
+</html>

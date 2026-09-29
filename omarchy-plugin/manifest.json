@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.voxprogent.meetagent",
+  "name": "MeetAgent",
+  "version": "0.1.0",
+  "author": "voxprogent",
+  "description": "Omarchy 状态栏里的本地会议录制控制。",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "MeetAgent",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

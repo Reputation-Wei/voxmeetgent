@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config.toml
+
+# Meeting artifacts and model data
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.jsonl
+meetings/
+Meetings/
+.cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

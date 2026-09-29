@@ -1,0 +1,45 @@
+[project]
+name = "meetagent"
+version = "0.1.0"
+description = "Local-first multilingual meeting assistant demo"
+readme = "README-demo.md"
+requires-python = ">=3.12"
+dependencies = [
+  "typer>=0.12",
+  "rich>=13.7",
+  "sounddevice>=0.5",
+  "numpy>=1.26",
+  "silero-vad>=5.1",
+  "onnxruntime>=1.20",
+  "mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "pywhispercpp>=1.4; sys_platform == 'linux'",
+  "opencc-python-reimplemented>=0.1.7",
+  "google-genai>=1.30",
+  "PyYAML>=6.0",
+  "sherpa-onnx>=1.10.28",
+  "sherpa-onnx-core==1.13.8",
+  "scipy>=1.18.1",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[project.scripts]
+meetagent = "meetagent.cli:app"
+
+[project.optional-dependencies]
+aec = [
+    "pywebrtc-audio>=0.2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/meetagent"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/meetagent/ui/web/index.html" = "meetagent/ui/web/index.html"

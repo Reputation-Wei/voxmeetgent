@@ -1,0 +1,18 @@
+wake:
+  - agent
+  - 助手
+  - hey agent
+research:
+  - 有没有相关研究
+  - related work
+  - gibt es forschung
+fact_check:
+  - 这是真的吗
+  - fact check
+  - stimmt das
+logic_check:
+  - 逻辑检查
+  - 有没有逻辑问题
+  - logical contradiction
+  - check the reasoning
+  - widerspruch
