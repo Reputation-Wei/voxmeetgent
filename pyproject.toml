@@ -2,7 +2,7 @@
 name = "meetagent"
 version = "0.1.0"
 description = "Local-first multilingual meeting assistant demo"
-readme = "README-demo.md"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "typer>=0.12",
