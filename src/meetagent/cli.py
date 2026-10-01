@@ -7,6 +7,7 @@ from typing import Literal
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 from meetagent.demo import run_demo, run_local_transcription
 from meetagent.config import AppConfig
@@ -51,13 +52,19 @@ def gui(
 
 
 @app.command("doctor")
-def doctor() -> None:
+def doctor(
+    report_only: bool = typer.Option(
+        False, "--report-only",
+        help="只报告检查结果，缺少本机前提（模型、麦克风等）时也返回 0；供 CI 验证 doctor 可运行",
+    ),
+) -> None:
     """检查本机依赖和运行配置，不启动录音。"""
     checks = diagnostics(AppConfig.load())
     for name, ok, detail in checks:
         marker = "✓" if ok else "✗"
-        console.print(f"{marker} {name}: {detail}")
-    raise typer.Exit(exit_code(checks))
+        # Details contain literal brackets such as "[audio].model_path".
+        console.print(f"{marker} {escape(name)}: {escape(detail)}")
+    raise typer.Exit(0 if report_only else exit_code(checks))
 
 
 @app.command("demo")
