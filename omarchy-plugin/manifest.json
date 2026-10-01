@@ -2,17 +2,40 @@
   "schemaVersion": 1,
   "id": "io.github.voxprogent.meetagent",
   "name": "MeetAgent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "voxprogent",
   "description": "Omarchy 状态栏里的本地会议录制控制。",
-  "kinds": ["bar-widget"],
+  "kinds": [
+    "bar-widget"
+  ],
   "entryPoints": {
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
     "displayName": "MeetAgent",
+    "description": "本地会议录音、转写与 Gemini Live 控制",
     "category": "Productivity",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": {
+      "serviceCommand": "meetagent gui --no-open",
+      "outputDirectory": "~/Meetings",
+      "language": "auto",
+      "summaryLanguage": "zh"
+    },
+    "schema": [
+      {
+        "key": "serviceCommand",
+        "type": "string",
+        "label": "启动服务命令",
+        "defaultValue": "meetagent gui --no-open"
+      },
+      {
+        "key": "outputDirectory",
+        "type": "path",
+        "label": "默认保存目录",
+        "defaultValue": "~/Meetings"
+      }
+    ]
   }
 }
