@@ -7,6 +7,7 @@
 - 状态栏显示服务在线状态、录音状态和计时。
 - 弹出面板可以设置输出目录和转写语言（自动、中文、英语、德语）。
 - 默认只做本地录音和转写。
+- 回答方式可切换：语音（需戴耳机，外放时回声会打断 Agent）或文字（不连接 Gemini Live、不上传会议音频，回答显示在面板“Agent 最近回答”和逐字稿中）。默认值读取 `~/.config/meetagent/config.toml` 的 `[live] reply`。
 - Gemini Live 需要单独打开，并勾选整场音频上传同意。
 - 会后纪要上传有独立同意项，默认关闭。
 - 停止会议时调用本机 GUI 的停止接口，让音频和逐字稿正常收尾。
@@ -44,9 +45,20 @@ omarchy bar move io.github.voxprogent.meetagent --section right
 
 如果 Omarchy 插件 CLI 提示命令参数有所不同，以该版本 `omarchy plugin --help` 和官方插件手册为准。移除插件可使用 `omarchy plugin remove io.github.voxprogent.meetagent`，然后删除上面的插件目录。
 
+修改已安装插件的 QML 后，`rescanPlugins` 不会让 Quickshell 丢弃已缓存的组件，需运行 `omarchy-restart-shell` 才能加载新版本。
+
+## 设置
+
+在 Omarchy 的 bar 设置中可修改：
+
+- `serviceCommand`：面板内“启动 MeetAgent 服务”按钮执行的命令，默认 `meetagent gui --no-open`。从仓库开发时可设为 `uv run --project ~/Projects/voxmeetgent meetagent gui --no-open`。
+- `outputDirectory`：默认保存目录。
+
 ## 开发状态
 
-目前在 macOS 开发环境完成插件 manifest、QML 和 API 对接。尚未在 Omarchy/Quickshell 主机执行插件验证或 GUI/麦克风验收。首版弹出面板提供快速控制；逐字稿浏览、speaker 校订、状态服务自动启动、打包分发仍待开发。
+已在 Omarchy（Quickshell 0.3.1）上验证：插件加载、面板渲染（使用 Omarchy 的 `Panel`/`KeyboardPanel` 组件并跟随主题）、通过本机服务开始/停止本地录音、状态栏录音计时，以及 Intel Arc B390 上的 Vulkan 转写。Gemini Live 模式未在 Linux 上验收。逐字稿浏览、speaker 校订、打包分发仍待开发。
+
+Quickshell 只能在 Linux/Wayland 下运行，macOS 上无法测试此插件；macOS 上只能测试它调用的本机 HTTP 服务。
 
 ## 参考
 

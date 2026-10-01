@@ -26,6 +26,8 @@ class StartMeetingRequest(BaseModel):
     live: bool = False
     consent_to_stream: bool = False
     consent_to_summary_upload: bool = False
+    # voice: speak answers; text: print only, no Gemini Live. None = config default.
+    reply: str | None = Field(default=None, pattern="^(voice|text)$")
 
 
 def create_app(service: MeetingService | None = None, token: str | None = None) -> FastAPI:
@@ -78,6 +80,7 @@ def create_app(service: MeetingService | None = None, token: str | None = None) 
                 language=payload.language, summary_language=payload.summary_language,
                 live=payload.live, consent_to_stream=payload.consent_to_stream,
                 consent_to_summary_upload=payload.consent_to_summary_upload,
+                reply=payload.reply,
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc

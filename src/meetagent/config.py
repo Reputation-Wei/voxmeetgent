@@ -40,6 +40,15 @@ class LiveConfig:
     mode: Literal["realtime", "text_trigger"] = "realtime"
     intervention: Literal["silent", "on_request", "proactive"] = "on_request"
     rms_threshold: float = 0.02
+    # Send speaker-labeled local transcript lines and Analyst conclusions to the
+    # Live session as context (PLAN.md Phase 8 P1). Off until the P1 spike shows
+    # that mixing send_client_content with realtime audio is safe; the SDK warns
+    # that interleaving them "can lead to unexpected results".
+    share_transcript: bool = False
+    # "voice": speak answers; "text": print them only and skip Gemini Live
+    # entirely (no meeting audio upload). Text avoids speaker echo cutting
+    # replies off when not using headphones.
+    reply: Literal["voice", "text"] = "voice"
 
 
 @dataclass(frozen=True)
@@ -67,6 +76,9 @@ class AppConfig:
         intervention = live_raw.get("intervention", "on_request")
         if intervention not in {"silent", "on_request", "proactive"}:
             raise ValueError("[live].intervention 只能是 silent、on_request 或 proactive。")
+        reply = live_raw.get("reply", "voice")
+        if reply not in {"voice", "text"}:
+            raise ValueError("[live].reply 只能是 voice 或 text。")
         rms_threshold = float(live_raw.get("rms_threshold", 0.02))
         if not 0 < rms_threshold < 1:
             raise ValueError("[live].rms_threshold 必须大于 0 且小于 1。")
@@ -98,5 +110,7 @@ class AppConfig:
                 mode=live_raw.get("mode", "realtime"),
                 intervention=intervention,
                 rms_threshold=rms_threshold,
+                share_transcript=bool(live_raw.get("share_transcript", False)),
+                reply=reply,
             ),
         )

@@ -15,4 +15,6 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --dev
       - run: uv run pytest
-      - run: uv run meetagent doctor
+      # CI runners have no microphone or Whisper model; this only checks that
+      # doctor runs. Missing prerequisites are still printed in the log.
+      - run: uv run meetagent doctor --report-only

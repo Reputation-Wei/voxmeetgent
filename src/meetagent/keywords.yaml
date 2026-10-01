@@ -1,14 +1,30 @@
+# Trigger phrases (case-insensitive substring match on local Whisper text).
+# Every kind except `wake` starts an analysis and is spoken without first
+# calling the Agent by name (PLAN.md Phase 8, user decision 2026-10-01).
 wake:
   - agent
   - 助手
   - hey agent
 research:
   - 有没有相关研究
+  - 相关研究
+  - 相关工作
+  - 有没有人做过
+  - 别人做过
   - related work
+  - prior work
+  - has anyone done
   - gibt es forschung
+  - hat das schon jemand
 fact_check:
   - 这是真的吗
+  - 是真的吗
+  - 有没有事实错误
+  - 事实核查
+  - 核实一下
   - fact check
+  - is that true
+  - is that correct
   - stimmt das
 logic_check:
   - 逻辑检查
@@ -16,3 +32,13 @@ logic_check:
   - logical contradiction
   - check the reasoning
   - widerspruch
+summarize:
+  - 总结一下
+  - 总结我们
+  - 总结刚才
+  - 帮我们总结
+  - summarize
+  - sum up
+  - recap
+  - zusammenfassen
+  - fass zusammen

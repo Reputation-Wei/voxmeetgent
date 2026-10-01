@@ -342,6 +342,43 @@ Live 会话管理（压缩、resumption、断线重连、goAway 处理）；Inte
 - `omarchy plugin remove` 不会清理 `shell.json` 中的条目 —— 卸载说明里要写明，或提供清理命令。
 - 验收：`omarchy plugin validate` 通过；在 Omarchy 4 上一条命令装好，bar 上能开始/结束会议，面板里看到实时转写。完整跨平台 Web GUI 验收属于 Phase 6。
 
+### Phase 8 —— 参与式 Agent（真正参与会议讨论）
+
+**目标**：从“被点名才回答的工具”变成会议参与者：知道谁说了什么、能总结讨论、能上网核查事实和检索相关研究，并在有价值时“举手”请求发言。用户于 2026-10-01 选定自主程度 **B（举手、人批准后发言）**，并要求**点名或说出关键词时直接触发**（见第 6 节第 5 条）。
+
+**发言授权（三条路径，`silent` 模式下全部关闭）**：
+
+| 路径 | 触发 | 是否需要批准 |
+|---|---|---|
+| 点名 | 明确称呼 Agent 并提问（P2 起由分类器判断，不限固定句） | 否，直接回答 |
+| 关键词 | 研究（“有没有相关研究”/related work/gibt es Forschung）、核查（“这是真的吗”/fact check/stimmt das）、逻辑检查、总结（“总结一下”/summarize/zusammenfassen） | 否，分析后直接播报 |
+| 举手 | Agent 自行判断有值得说的内容（P3） | 是，人说“请讲”或点击批准 |
+
+**P1 共享会议状态（MeetingState）**
+
+1. 新增 `agent/meeting_state.py`：会议唯一的“工作记忆”，订阅本地逐字稿（含说话人）和 Analyst Finding；提供带真实说话人的时间窗口逐字稿，以及按需由 Gemini Flash 增量更新的结构化摘要：议题、各说话人的主张、待决问题、可核查陈述、已有核查/研究结论。
+2. Analyst 的所有请求（核查、逻辑、研究、总结）都从 MeetingState 取上下文：近期逐字稿保留说话人姓名，并附上会议摘要，使回答能指出“谁在什么时候说了什么”。
+3. 新增 `summarize` 触发：总结至今讨论（议题、各方观点、共识/分歧、待决问题），不编造决议。
+4. 关键词触发不再要求点名，分析完成后直接播报；分析在后台任务中运行，不阻塞本地 VAD/ASR；同一时间只播报一个回答。
+5. Live 会话通过 `send_client_content(turn_complete=False)` 增量接收带说话人的本地逐字稿和 Analyst 结论（官方文档：该接口在整个会话期间可用，且 `turn_complete=False` 不触发回答），使 Live 回答时知道“谁说了什么、核查结论是什么”。
+6. **Spike（需 Gemini key，在用户设备执行）**：验证“只听不说”。比较 (a) 当前自动 VAD + 客户端丢弃未授权音频，(b) `realtime_input_config.automatic_activity_detection.disabled=True` 且只在授权回合发送 `activity_start/activity_end`，(c) 只发送逐字稿文本、对话窗口内才上传音频。记录未授权回合是否仍生成音频、模型上下文是否包含被丢弃的发言、延迟和每小时成本，据此选定 P2 的 Live 模式。
+
+**验收**：离线单元测试覆盖 MeetingState 窗口/摘要合并、三语关键词（含 summarize）、发言授权规则；fixture 会议中说“这是真的吗”无需点名即触发核查并播报；Analyst 提示词中的逐字稿带真实说话人；分析期间本地转写不停顿。
+
+**P1 实现进度（2026-10-01）**：新增 `agent/meeting_state.py`（MeetingState：带说话人的近期逐字稿、按需 Gemini 增量摘要、摘要不可用时带字数上限的较早原文回退、Agent 已给结论、Live 增量游标）；`InterventionPolicy.may_speak(call|keyword|hand_raise)`；关键词表新增 `summarize` 并扩充三语研究/核查说法；关键词无需点名即分析并播报，分析放后台任务、同类请求合并、播报串行；Analyst 输出新增 `spoken` 口语结论用于播报；Live 每 3 秒及被点名前用 `send_client_content(turn_complete=False)` 注入逐字稿与结论（`[live] share_transcript` 可关闭）。离线测试 11 项通过，`demo --file` 离线路径正常。**未验收**：当前机器无 Gemini key，摘要、`spoken` 质量、Live 上下文注入是否引发多余回答及第 6 项 spike 均需在用户设备实测。
+
+**P1 首次实机结果（2026-10-01，Omarchy + B390）**：关键词“这是真的吗”无需点名即触发核查，“总结一下”触发总结，输出带说话人和时间戳；本地 B390 转写正常。发现并修复：`_speak` 缺少 `role="user"` 导致 Live 1007（已用真实 key 验证，改为流式播放后首音频约 1.7 s，原为整段生成完才播）；中文模式 Whisper 把 “Agent” 听成 “A阵盾”，点名失败，临时接受“助手，你怎么看”，根本解决归入 P2；Live 输入转写会凭空误听（如整句无关内容），已从 MeetingState 上下文中排除；SDK 文档警告混用 `send_client_content` 与 `send_realtime_input` 可能产生意外结果，`[live] share_transcript` 改为默认关闭，待第 6 项 spike 验证。同一人仍会被标为“说话人未知”和“Speaker 1”，需要会前 `meetagent enroll`。
+
+**P1 第二轮实机结果（2026-10-01）**：“助手你怎么看”点名后，Live 回答被授权逻辑丢弃——本地确认的点名文字会让服务端中断 Live 已在生成的回合，`interrupted` 清掉了整个授权；改为 `_LiveCallGate`（3 s 宽限、回复开始前不因旧回合结束撤销、15 s 过期）。修复后 Agent 开口即被打断：笔记本扬声器回声在麦克风上的 RMS 约 0.13，与真人发言（0.10–0.42）同量级，远超插话门限 0.02，WebRTC AEC 播放起始阶段未能压制，服务端 VAD 也把回声当作插话。语音模式目前须戴耳机；扬声器下的回声抑制（AEC 延迟校准、播放期间插话判定）列入 P2。新增文字回复模式 `--reply text` / `[live] reply = "text"`：不连接 Live、不上传会议音频，点名由 Analyst（带搜索）回答，所有回答只打印并写入逐字稿。
+
+**P2 自然称呼与对话窗口**：用小模型判断一句话是否对 Agent 说（可配置 Agent 名称，中英德）；回答后保留约 20–30 秒追问窗口，期间无需重新点名；按 P1 spike 结论确定 Live 模式。
+
+**P3 举手机制**：每次发言轮次结束后，后台根据 MeetingState 评估“是否有值得说的内容”（事实错误、遗漏的相关研究、逻辑矛盾、被忽略的问题），按置信度、新颖度和频率上限（默认每 5 分钟最多 1 次）打分；超过阈值则举手：Omarchy 插件/GUI 显示待发言卡片并可选轻提示音，人说“请讲/go ahead/bitte”或点击后才播报，忽略则过期撤回。所有举手记录写入 findings 和纪要。
+
+**P4 线上会议声音通路**：PipeWire 虚拟麦克风把 Agent 语音送进 Zoom/Meet 等会议软件；采集系统音频（monitor source）与麦克风混合（ADR-008）；macOS 对应方案另行 spike。
+
+**P5 评测框架**：可回放的会议场景（自录，含故意的事实错误、相关研究讨论、点名、普通提及 Agent），统计该说时是否说、不该说时是否插嘴、事实错误检出率、首音频延迟；举手阈值据此调校。
+
 ---
 
 ## 5. 通用要求
@@ -362,3 +399,8 @@ Live 会话管理（压缩、resumption、断线重连、goAway 处理）；Inte
    - 每次会议可临时覆盖输出目录；GUI 提供目录选择器。没有有效输出目录时不允许开始录音。
    - Obsidian 模式检查路径下存在 `.obsidian/`；纪要带 YAML frontmatter（date、participants、tags）。音频、TXT 和 JSONL 保存在主输出目录，Markdown 纪要可另外同步到 vault。
 4. **Gemini 接入：先用 AI Studio API key**（google-genai SDK 的 Gemini Developer API 模式）。client 创建集中在一处，将来切 Vertex AI 只改这里。
+5. **Agent 参与方式（2026-10-01）：自主程度 B。** 取代 2026-09-29“只有明确呼叫才可发言”的约束：
+   - 点名提问：直接回答。
+   - 关键词（相关研究、事实核查、逻辑检查、总结讨论，中英德）：无需点名，分析后直接播报，Agent 需能总结讨论、上网搜索、指出事实性错误并检索相关研究。
+   - Agent 自行判断有话要说时只能“举手”，由人批准后才发言（Phase 8 P3）。
+   - `silent` 模式仍关闭全部语音。

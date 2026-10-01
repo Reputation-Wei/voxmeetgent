@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import platform
 from dataclasses import replace
 import re
 from difflib import SequenceMatcher
@@ -20,6 +21,7 @@ import numpy as np
 import yaml
 from meetagent.agent.analyst import GeminiAnalyst
 from meetagent.agent.intervention import InterventionPolicy
+from meetagent.agent.meeting_state import MeetingState, gemini_digest
 from meetagent.agent.summarizer import local_fallback_summary, persist_summary, summarize_with_gemini
 from rich.console import Console
 from rich.markdown import Markdown
@@ -127,11 +129,72 @@ class _PlaybackBuffer:
             self._echo_reference.write_24k(outdata[:, 0])
 
 
+class _LiveCallGate:
+    """Carry one call's playback authorization across Live's turn events.
+
+    Live hears the call in the audio stream too and may already be generating
+    an (unauthorized) reply when the locally confirmed call text arrives. The
+    text then makes the server interrupt that reply. Clearing the whole
+    authorization on that `interrupted` dropped the real answer, so:
+    - an `interrupted` within GRACE seconds of sending the call only clears audio;
+    - a `turn_complete` before any authorized reply audio does not end the grant;
+    - a grant with no reply audio after EXPIRY seconds is revoked, so later
+      unrequested speech can never use it.
+    """
+
+    GRACE_SECONDS = 3.0
+    EXPIRY_SECONDS = 15.0
+
+    def __init__(self, playback: _PlaybackBuffer, clock: Any = time.monotonic) -> None:
+        self._playback = playback
+        self._clock = clock
+        self._sent_at: float | None = None
+        self._reply_started = False
+
+    @property
+    def waiting(self) -> bool:
+        return self._sent_at is not None
+
+    def call_sent(self) -> None:
+        self._sent_at = self._clock()
+        self._reply_started = False
+        self._playback.begin_response()
+        self._playback.authorize_response()
+
+    def on_audio(self, pcm: bytes) -> None:
+        if (
+            self._sent_at is not None and not self._reply_started
+            and self._clock() - self._sent_at > self.EXPIRY_SECONDS
+        ):
+            self._sent_at = None
+            self._playback.finish_response()
+        self._playback.add(pcm)
+        if self._sent_at is not None and self._playback.response_authorized():
+            self._reply_started = True
+
+    def on_interrupted(self) -> bool:
+        """Return True if this interruption was caused by our own call text."""
+        self._playback.clear_server_turn()
+        if self._sent_at is not None and self._clock() - self._sent_at < self.GRACE_SECONDS:
+            self._playback.authorize_response()
+            self._reply_started = False
+            return True
+        self._sent_at = None
+        return False
+
+    def on_turn_complete(self) -> None:
+        if self._sent_at is not None and not self._reply_started:
+            return  # an earlier turn ended; the reply to the call is still coming
+        self._sent_at = None
+        self._playback.finish_response()
+
+
 def _contains_authorized_call(text: str) -> bool:
     """Accept the explicit Agent call phrase, not incidental Agent mentions."""
     lower = text.casefold()
+    # Whisper in zh mode often mishears "Agent"; 助手 is the reliable Chinese call.
     call_phrases = (
-        r"(?:hey\s*)?agent[\s,，:：、]*你怎么看",
+        r"(?:hey\s*)?(?:agent|助手)[\s,，:：、]*你怎么看",
         r"(?:hey\s*)?agent[\s,，:：、]*what\s+do\s+you\s+think",
         r"(?:hey\s*)?agent[\s,，:：、]*was\s+meinst\s+du",
     )
@@ -206,6 +269,14 @@ async def _answer(
             "核查最近发言中最重要、可验证的事实陈述。按 Claim / Verdict / Confidence / Evidence 输出。"
             "Verdict 使用 supported、contradicted、mixed、unverified 之一；区分证据和推断，"
             "Confidence 是 0 到 1 的数值；只有搜索结果实际支持时才下结论，说明反证或不确定性。"
+            "数字类陈述（数量、规模、日期、比例、金额等）按以下规则判定："
+            "1) 在 stated_value 写出发言者说的具体数值，在 reference_value 写出可靠来源给出的数值及其口径；"
+            "2) 只把发言者的数值与来源数值直接比较，不得用“同一数量级”“千万级别”“大致相当”等放宽口径来判定属实；"
+            "3) 发言者用“大约/左右”时，与来源相差在 10% 以内才算 supported；未加限定词时按原数值比较；"
+            "4) 相差超过 10% 判 contradicted；对象有多个常见口径（如完整数据集与常用子集）且发言者数值与任何一个口径都不相符时，也判 contradicted，并在 evidence 中列出各口径的数值；"
+            "只有发言者数值符合其中一个口径而另一口径不符时，才判 mixed；"
+            "5) spoken 中要说出正确数值。"
+            "逐字稿中明显的语音识别错误或与讨论无关的句子不要当作发言者陈述来核查。"
         )
     elif trigger_kind == "logic_check":
         task = (
@@ -222,13 +293,19 @@ async def _answer(
             "从会议窗口中抽取最多 8 条可验证的事实陈述；排除意见、计划和纯粹假设。"
             "保留原话含义，并给出发言者、时间戳和为什么可以核查。不要判断真伪，不要给建议。"
         )
+    elif trigger_kind == "summarize":
+        task = (
+            "总结到目前为止的讨论：议题、每位说话人的主要观点（写出姓名）、共识、分歧和待决问题。"
+            "只依据会议上下文，不推断未明确说出的决议或负责人。"
+        )
     else:
-        task = "根据最近两分钟的讨论简洁回答触发者的问题。"
+        task = "结合会议上下文简洁回答触发者的问题。"
     prompt = (
-        "你是会议中的谨慎研究助理。使用触发者原本的语言。只依据逐字稿、Google Search grounding 和论文候选作答；"
-        "保留事实与推断的区别，不确定时明确说明。\n"
+        "你是参与会议讨论的谨慎研究助理。使用触发者原本的语言。只依据会议上下文、Google Search grounding 和论文候选作答；"
+        "保留事实与推断的区别，不确定时明确说明。指出问题时说明是谁在什么时间说的。"
+        "spoken 字段写一到三句适合在会议中直接说出口的结论，不要念链接或 Markdown。\n"
         f"任务：{task}\n触发类型：{trigger_kind}\n触发者原话：{request_text}\n"
-        f"最近会议逐字稿：\n{transcript}{paper_context}"
+        f"会议上下文：\n{transcript}{paper_context}"
     )
     if trigger_kind == "fact_check":
         schema: dict[str, Any] = {
@@ -238,6 +315,9 @@ async def _answer(
                     "verdict": {"type": "STRING", "enum": ["supported", "contradicted", "mixed", "unverified"]},
                     "confidence": {"type": "NUMBER"},
                     "evidence": {"type": "STRING"},
+                    # Numeric claims: what was said vs. what sources say.
+                    "stated_value": {"type": "STRING"},
+                    "reference_value": {"type": "STRING"},
                 }, "required": ["claim", "verdict", "confidence", "evidence"]}},
             }, "required": ["findings"],
         }
@@ -271,15 +351,34 @@ async def _answer(
                 }, "required": ["claim", "speaker", "timestamp", "why_verifiable"]}},
             }, "required": ["claims"],
         }
+    elif trigger_kind == "summarize":
+        schema = {
+            "type": "OBJECT", "properties": {
+                "topics": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "positions": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+                    "speaker": {"type": "STRING"}, "position": {"type": "STRING"},
+                }, "required": ["speaker", "position"]}},
+                "agreements": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "disagreements": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "open_questions": {"type": "ARRAY", "items": {"type": "STRING"}},
+            }, "required": ["topics", "positions", "agreements", "disagreements", "open_questions"],
+        }
     else:
         schema = {"type": "OBJECT", "properties": {"answer": {"type": "STRING"}}, "required": ["answer"]}
+    # Every spoken analysis also returns a short conversational version to say aloud.
+    if trigger_kind != "claim_extract":
+        schema["properties"]["spoken"] = {"type": "STRING"}
+        schema["required"] = [*schema["required"], "spoken"]
 
     config_values: dict[str, Any] = {
         "response_mime_type": "application/json",
         "response_schema": schema,
     }
-    if trigger_kind in {"fact_check", "research"}:
+    if trigger_kind in {"fact_check", "research", "ask"}:
         config_values["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+    # No client-side function calling (search grounding is a built-in tool).
+    # Disabling it also silences the SDK's AFC warning on every call.
+    config_values["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
     response = await client.aio.models.generate_content(
         model="gemini-3.8-flash", contents=prompt,
         config=types.GenerateContentConfig(**config_values),
@@ -290,6 +389,7 @@ async def _answer(
     except json.JSONDecodeError:
         details = {}
     links: list[str] = []
+    titles: list[str] = []
     candidates = getattr(response, "candidates", None) or []
     for candidate in candidates:
         metadata = getattr(candidate, "grounding_metadata", None)
@@ -298,6 +398,8 @@ async def _answer(
             uri = getattr(web, "uri", None)
             if uri and uri not in links:
                 links.append(uri)
+                # Grounding URIs are long redirects; the title is the site name.
+                titles.append(str(getattr(web, "title", "") or ""))
     if trigger_kind == "fact_check":
         lines = ["## 事实核查"]
         for finding in details.get("findings", []):
@@ -312,6 +414,11 @@ async def _answer(
                 f"  - Confidence：{confidence:.0%}",
                 f"  - Evidence：{finding.get('evidence', '')}",
             ])
+            if finding.get("stated_value") or finding.get("reference_value"):
+                lines.append(
+                    f"  - 数值：发言 {finding.get('stated_value') or '—'}；"
+                    f"来源 {finding.get('reference_value') or '—'}"
+                )
         answer = "\n".join(lines) if len(lines) > 1 else (response.text or "没有可核查的事实陈述。")
     elif trigger_kind == "logic_check":
         lines = ["## 逻辑检查"]
@@ -355,14 +462,32 @@ async def _answer(
             for item in claims
         )
         answer = "\n".join(lines) if claims else "当前窗口没有抽取到可核查陈述。"
+    elif trigger_kind == "summarize":
+        lines = ["## 讨论总结"]
+        sections = (
+            ("议题", details.get("topics", [])),
+            ("各方观点", [f"{item.get('speaker', '说话人未知')}：{item.get('position', '')}"
+                       for item in details.get("positions", [])]),
+            ("共识", details.get("agreements", [])),
+            ("分歧", details.get("disagreements", [])),
+            ("待决问题", details.get("open_questions", [])),
+        )
+        for title, items in sections:
+            if items:
+                lines.append(f"### {title}")
+                lines.extend(f"- {item}" for item in items)
+        answer = "\n".join(lines) if len(lines) > 1 else (response.text or "目前还没有可总结的讨论。")
     else:
         answer = str(details.get("answer") or response.text or "没有生成文本回答。")
     details["source_urls"] = links.copy()
+    details["source_titles"] = titles + [""] * (len(links) - len(titles))
     return answer, links, papers, details
 
 
 async def _speak(answer: str, playback: _PlaybackBuffer | None = None) -> None:
     """Ask Gemini Live to speak a supplied answer, and play returned PCM."""
+    from google.genai import types
+
     client = await _gemini_client()
     try:
         import sounddevice as sd
@@ -374,26 +499,36 @@ async def _speak(answer: str, playback: _PlaybackBuffer | None = None) -> None:
         model="gemini-3.8-live",
         config={"response_modalities": ["AUDIO"]},
     ) as session:
+        # role="user" is required; without it Live rejects the turn with 1007.
         await session.send_client_content(
-            turns={"parts": [{"text": "请用自然、简短的口语朗读下面这段回答，不要增加内容：\n" + answer}]},
+            turns=types.Content(role="user", parts=[types.Part(
+                text="请用自然、简短的口语朗读下面这段回答，不要增加内容：\n" + answer,
+            )]),
             turn_complete=True,
         )
-        async for response in session.receive():
-            if response.data:
-                audio_parts.append(response.data)
-            content = response.server_content
-            if content and content.turn_complete:
-                break
-    if audio_parts:
-        if playback is not None:
-            playback.authorize_response()
-            for audio in audio_parts:
-                playback.add(audio)
-            playback.finish_response()
-        else:
-            pcm = np.frombuffer(b"".join(audio_parts), dtype=np.int16)
-            if pcm.size:
-                await asyncio.to_thread(sd.play, pcm, samplerate=PLAYBACK_SAMPLE_RATE, blocking=True)
+        streaming = False
+        try:
+            async for response in session.receive():
+                if response.data:
+                    if playback is not None:
+                        # Stream into the speaker as chunks arrive instead of
+                        # waiting for the whole reply (~1 s vs ~10 s to first sound).
+                        if not streaming:
+                            playback.authorize_response()
+                            streaming = True
+                        playback.add(response.data)
+                    else:
+                        audio_parts.append(response.data)
+                content = response.server_content
+                if content and content.turn_complete:
+                    break
+        finally:
+            if streaming:
+                playback.finish_response()
+    # Without a playback buffer (file mode), play the collected reply at once.
+    pcm = np.frombuffer(b"".join(audio_parts), dtype=np.int16)
+    if pcm.size:
+        await asyncio.to_thread(sd.play, pcm, samplerate=PLAYBACK_SAMPLE_RATE, blocking=True)
 
 
 async def _run_live_voice(
@@ -401,6 +536,7 @@ async def _run_live_voice(
     stop_requested: asyncio.Event, ready: asyncio.Event,
     entries: list[dict[str, Any]], transcript_path: Path, meeting_started: float,
     policy: InterventionPolicy,
+    meeting_state: MeetingState | None = None,
 ) -> None:
     """Keep Gemini Live listening and playing only explicitly requested replies."""
     from google.genai import types
@@ -410,11 +546,18 @@ async def _run_live_voice(
         "你是会议中的中英德语音助手。整场会议都认真倾听并记住上下文。除非听到明确呼叫短语‘Agent，你怎么看？’（或对应语言的‘Hey Agent, what do you think?’、‘Agent, was meinst du?’），否则必须保持静默，不要生成语音、提示音或主动总结。提及 Agent、提出普通问题、事实核查关键词都不构成呼叫。"
         "如果用户在会议中提到 related work、相关研究、fact check、事实核查或要求来源，保持安静；应用中的研究核查服务会单独处理并播报带来源的结果。"
         "回答使用提问者的中文、英语或德语，尽量简短。有人插话时立即停下并听对方说完。"
+        "你会不时收到以“[会议逐字稿更新]”或“[Agent 分析结论]”开头的文字：前者是本地高精度识别的带说话人发言，"
+        "后者是你已通过搜索得出的核查/研究结论。它们只是背景信息，不是提问，收到时不要回应；"
+        "被呼叫回答时，用它们说明是谁提出了什么观点。"
     )
     if policy.config.intervention == "silent":
         instruction += "本次介入模式为 silent：所有发言都保持静默，只接收上下文，不要输出语音或答案。"
     resumption_handle: str | None = None
+    # Shared across reconnects: resumed sessions keep earlier context.
+    transcript_cursor = 0.0
+    conclusions_sent = 0
     reconnects = 0
+    call_gate = _LiveCallGate(playback)
     agent_text_parts: list[str] = []
     pending_fallbacks: list[asyncio.Task[None]] = []
 
@@ -442,13 +585,43 @@ async def _run_live_voice(
         async with client.aio.live.connect(model=LIVE_MODEL_ID, config=config) as session:
             ready.set()
 
+            async def share_meeting_context() -> None:
+                """Inject new speaker-labeled lines and conclusions without asking for a reply."""
+                nonlocal transcript_cursor, conclusions_sent
+                if meeting_state is None:
+                    return
+                blocks: list[str] = []
+                lines, transcript_cursor = meeting_state.live_updates_since(transcript_cursor)
+                if lines:
+                    blocks.append("[会议逐字稿更新]\n" + lines)
+                fresh = meeting_state.conclusions[conclusions_sent:]
+                if fresh:
+                    blocks.append("[Agent 分析结论]\n" + "\n".join(
+                        f"- （{item.kind}）{item.text}" for item in fresh
+                    ))
+                    conclusions_sent += len(fresh)
+                if blocks:
+                    # turn_complete=False adds context without triggering a model turn.
+                    await session.send_client_content(
+                        turns=[{"role": "user", "parts": [{"text": "\n\n".join(blocks)}]}],
+                        turn_complete=False,
+                    )
+
             async def send_microphone() -> None:
+                last_context_push = 0.0
                 while not stop_requested.is_set() and not rotate.is_set():
+                    if time.monotonic() - last_context_push >= 3.0:
+                        last_context_push = time.monotonic()
+                        await share_meeting_context()
                     try:
                         direct_call = live_calls.get_nowait()
                     except asyncio.QueueEmpty:
                         direct_call = None
                     if direct_call is not None:
+                        # Make sure the reply sees the latest lines, not a 3 s old view.
+                        await share_meeting_context()
+                        last_context_push = time.monotonic()
+                        call_gate.call_sent()
                         await session.send_realtime_input(
                             text=(
                                 "本地高精度 Whisper 已确认与会者明确呼叫 Agent。"
@@ -480,8 +653,8 @@ async def _run_live_voice(
                         if content:
                             if content.interrupted:
                                 save_agent_turn()
-                                playback.clear_server_turn()
-                                console.print("[dim]检测到插话，已清空 Agent 待播语音。[/dim]")
+                                if not call_gate.on_interrupted():
+                                    console.print("[dim]检测到插话，已清空 Agent 待播语音。[/dim]")
                             if content.input_transcription and content.input_transcription.text:
                                 heard = content.input_transcription.text
                                 console.print(f"[dim]Live 听到：{heard}[/dim]")
@@ -502,11 +675,11 @@ async def _run_live_voice(
                                 for part in content.model_turn.parts or []:
                                     audio = getattr(getattr(part, "inline_data", None), "data", None)
                                     if audio:
-                                        playback.add(audio)
+                                        call_gate.on_audio(audio)
                             if content.turn_complete:
                                 save_agent_turn()
                                 console.print()
-                                playback.finish_response()
+                                call_gate.on_turn_complete()
                     if received == 0:
                         await asyncio.sleep(0.05)
 
@@ -532,6 +705,12 @@ async def _run_live_voice(
             try:
                 rotate = await one_connection()
             except Exception as exc:
+                # A rejected key never fixes itself; retrying would only delay
+                # local transcription while the caller waits for Live.
+                if "API key not valid" in str(exc) or "PERMISSION_DENIED" in str(exc):
+                    raise RuntimeError(
+                        "Gemini API key 无效或无权限，请检查 GEMINI_API_KEY（运行 meetagent doctor）。"
+                    ) from exc
                 reconnects += 1
                 retry_attempt += 1
                 delay = min(30, 2 ** min(retry_attempt - 1, 5))
@@ -712,6 +891,10 @@ async def _write_summary(
     return path, generated_by_gemini
 
 
+# One spoken answer at a time; concurrent analyses queue here before playback.
+_speech_lock = asyncio.Lock()
+
+
 async def _handle_trigger(
     trigger_kind: str, entries: list[dict[str, Any]], answers: list[dict[str, Any]],
     playback: _PlaybackBuffer | None = None,
@@ -720,12 +903,13 @@ async def _handle_trigger(
     analyst: GeminiAnalyst | None = None,
     policy: InterventionPolicy | None = None,
     directly_addressed: bool = False,
+    meeting_state: MeetingState | None = None,
 ) -> None:
-    cutoff = time.time() - 120
-    recent = [item for item in entries if item["timestamp"] >= cutoff]
-    transcript = "\n".join(f"[{item['time']}] Speaker: {item['text']}" for item in recent)
+    """Analyze with full meeting context, record the answer, and speak it if allowed."""
+    state = meeting_state or MeetingState(entries)
     console.print(f"\n[bold cyan]触发：{trigger_kind}，正在搜索并核查…[/bold cyan]")
     try:
+        transcript = await state.analysis_context()
         if analyst is None:
             answer, links, papers, details = await _answer(transcript, trigger_kind, request_text)
             findings = []
@@ -737,23 +921,33 @@ async def _handle_trigger(
             findings = analysis.findings
         console.print(Markdown(answer))
         if links:
-            console.print("\n来源：" + "  ".join(f"[{i}]({url})" for i, url in enumerate(links, 1)))
+            # Short clickable site names (OSC 8 links); full URLs stay in the transcript.
+            titles = details.get("source_titles") or []
+            labels = [
+                f"[link={url}]{(titles[i - 1] if i - 1 < len(titles) else '') or f'[{i}]'}[/link]"
+                for i, url in enumerate(links, 1)
+            ]
+            console.print("来源：" + "  ".join(labels))
+        spoken = str(details.get("spoken") or "").strip()
         answers.append({
             "trigger": trigger_kind, "request": request_text,
             "answer": answer, "sources": links, "papers": papers, "details": details,
             "finding_count": len(findings),
         })
+        state.add_conclusion(trigger_kind, spoken or answer, links)
         if transcript_path is not None and meeting_started is not None:
             _record_agent_utterance(
                 answer, entries, transcript_path, meeting_started, source="analyst",
             )
-        if policy is None:
-            may_speak = directly_addressed
-        else:
-            may_speak = policy.authorize_live_turn(directly_addressed)
+        # Keyword requests speak without a name call (PLAN.md Phase 8, decision 5).
+        reason = "call" if directly_addressed else "keyword"
+        may_speak = policy.may_speak(reason) if policy is not None else True
         if may_speak:
             console.print("[dim]Agent 正在语音回答…[/dim]")
-            await _speak(answer, playback=playback)
+            async with _speech_lock:
+                await _speak(spoken or answer, playback=playback)
+        elif policy is not None and policy.config.reply == "text":
+            console.print("[dim]文字回复模式：回答已显示并写入逐字稿，不播报。[/dim]")
         else:
             console.print("[dim]当前介入策略为静默；回答已显示并写入逐字稿。[/dim]")
     except Exception as exc:
@@ -764,14 +958,20 @@ async def _process_audio(
     audio: np.ndarray, start_seconds: float, entries: list[dict[str, Any]],
     answers: list[dict[str, Any]], keywords: dict[str, list[str]], meeting_started: float,
     transcript_path: Path, language: str,
-    require_direct_address: bool = False,
     playback: _PlaybackBuffer | None = None,
     run_triggers: bool = True,
     speaker_identifier: SherpaSpeakerIdentifier | None = None,
     analyst: GeminiAnalyst | None = None,
     policy: InterventionPolicy | None = None,
     live_calls: asyncio.Queue[str] | None = None,
+    meeting_state: MeetingState | None = None,
+    trigger_tasks: set[asyncio.Task[None]] | None = None,
 ) -> None:
+    """Transcribe one VAD segment, store it, and dispatch any Agent trigger.
+
+    With `trigger_tasks`, analyses run in the background so local ASR keeps up
+    during web searches; without it (offline files) they run inline.
+    """
     try:
         text, detected_language = await asyncio.to_thread(_transcribe, audio, language)
     except Exception as exc:
@@ -830,19 +1030,33 @@ async def _process_audio(
         return
     kind = _trigger(text, keywords)
     addressed = _contains_authorized_call(text)
-    if addressed and kind is None and playback is not None and policy is not None:
-        if policy.authorize_live_turn(True):
-            playback.begin_response()
-            playback.authorize_response()
-            if live_calls is not None:
+    if addressed and kind is None:
+        if live_calls is not None:
+            if policy is not None and policy.authorize_live_turn(True):
                 live_calls.put_nowait(text)
-    if kind and (addressed or not require_direct_address):
-        await _handle_trigger(
-            kind, entries, answers, playback=playback,
-            transcript_path=transcript_path, meeting_started=meeting_started,
-            request_text=text, analyst=analyst, policy=policy,
-            directly_addressed=addressed,
-        )
+            return
+        # No Live session (text reply mode, or Live unavailable): answer the
+        # call with the Analyst, which can also search the web.
+        kind = "ask"
+    if not kind:
+        return
+    analysis = _handle_trigger(
+        kind, entries, answers, playback=playback,
+        transcript_path=transcript_path, meeting_started=meeting_started,
+        request_text=text, analyst=analyst, policy=policy,
+        directly_addressed=addressed, meeting_state=meeting_state,
+    )
+    if trigger_tasks is None:
+        await analysis
+        return
+    task_name = f"trigger-{kind}"
+    if any(task.get_name() == task_name and not task.done() for task in trigger_tasks):
+        analysis.close()
+        console.print(f"[dim]{kind} 分析仍在进行，本次重复请求已合并。[/dim]")
+        return
+    task = asyncio.create_task(analysis, name=task_name)
+    trigger_tasks.add(task)
+    task.add_done_callback(trigger_tasks.discard)
 
 
 async def _run_file(
@@ -853,6 +1067,7 @@ async def _run_file(
     analyst: GeminiAnalyst | None = None,
     policy: InterventionPolicy | None = None,
     live_calls: asyncio.Queue[str] | None = None,
+    meeting_state: MeetingState | None = None,
 ) -> None:
     """Transcribe WAV speech segments locally using Silero VAD."""
     with wave.open(str(file), "rb") as wav:
@@ -881,7 +1096,7 @@ async def _run_file(
             segment.audio, segment.start_seconds, entries, answers, keywords,
             meeting_started, transcript_path, language, run_triggers=run_triggers,
             speaker_identifier=speaker_identifier, analyst=analyst, policy=policy,
-            live_calls=live_calls,
+            live_calls=live_calls, meeting_state=meeting_state,
         )
 
 
@@ -918,8 +1133,12 @@ async def _run_microphone(
     live_enabled: bool = True,
     aec_enabled: bool = True, aec_delay_ms: int = 20,
     external_stop: asyncio.Event | None = None,
+    meeting_state: MeetingState | None = None,
+    share_transcript_with_live: bool = True,
 ) -> None:
     """Capture once, then fan microphone frames out to local ASR and Live."""
+    meeting_state = meeting_state or MeetingState(entries)
+    trigger_tasks: set[asyncio.Task[None]] = set()
     try:
         import sounddevice as sd
     except ImportError as exc:
@@ -1070,9 +1289,12 @@ async def _run_microphone(
             await _process_audio(
                 np.concatenate(pending), speech_start, entries, answers, keywords,
                 meeting_started, transcript_path, language,
-                require_direct_address=True, playback=playback,
+                playback=playback,
                 speaker_identifier=speaker_identifier, analyst=analyst,
-                policy=policy, live_calls=live_calls,
+                policy=policy,
+                # Calls go to Live only while a Live session is running.
+                live_calls=live_calls if live_task is not None else None,
+                meeting_state=meeting_state, trigger_tasks=trigger_tasks,
             )
             pending = []
             speech_start = None
@@ -1105,6 +1327,7 @@ async def _run_microphone(
                         live_chunks, live_calls, playback, stop_requested, live_ready,
                         entries, transcript_path, meeting_started,
                         policy,
+                        meeting_state if share_transcript_with_live else None,
                     ),
                     name="continuous-live-voice",
                 )
@@ -1157,15 +1380,19 @@ async def _run_microphone(
                     await _process_audio(
                         np.concatenate(pending), speech_start, entries, answers, keywords,
                         meeting_started, transcript_path, language,
-                        require_direct_address=True, playback=playback,
+                        playback=playback,
                         speaker_identifier=speaker_identifier, analyst=analyst,
-                        policy=policy, live_calls=live_calls,
+                        policy=policy, live_calls=None,
+                        meeting_state=meeting_state, trigger_tasks=trigger_tasks,
                     )
                     pending = []
                     speech_start = None
                 if claim_analysis_task is not None:
                     claim_analysis_task.cancel()
                     await asyncio.gather(claim_analysis_task, return_exceptions=True)
+                if trigger_tasks:
+                    console.print(f"[dim]等待 {len(trigger_tasks)} 个进行中的 Agent 分析完成…[/dim]")
+                    await asyncio.gather(*trigger_tasks, return_exceptions=True)
                 if live_task is not None:
                     try:
                         await asyncio.wait_for(live_task, timeout=8)
@@ -1194,6 +1421,7 @@ async def run_demo(
     enable_live: bool | None = None, external_stop: asyncio.Event | None = None,
     meeting_id: str | None = None,
     allow_gemini_summary: bool = True,
+    reply: str | None = None,
 ) -> None:
     """Run the selected audio mode and persist the meeting outputs."""
     if (out / ".obsidian").is_dir():
@@ -1211,6 +1439,13 @@ async def run_demo(
     use_aec = app_config.audio.aec_enabled if aec_enabled is None else aec_enabled
     if intervention is not None:
         live_config = replace(live_config, intervention=intervention)
+    if reply is not None:
+        live_config = replace(live_config, reply=reply)
+    if live_config.reply == "text":
+        # Text replies never need Gemini Live, so meeting audio is not uploaded.
+        enable_live = False
+        console.print("[bold]文字回复模式：不连接 Gemini Live、不上传会议音频；点名或关键词触发时，"
+                      "相关逐字稿会发送到 Gemini Flash 分析，回答只显示在终端并写入逐字稿。[/bold]")
     policy = InterventionPolicy(live_config)
     transcript_path = _new_transcript(out, datetime.now(), meeting_id)
     console.print("正在加载本地说话人识别模型（首次运行会下载到缓存）…")
@@ -1223,9 +1458,16 @@ async def run_demo(
         _answer, transcript_path.stem,
         transcript_path.with_suffix(".findings.jsonl"),
     )
+    # Shared working memory for Analyst and Live. The digest only calls Gemini
+    # right before an analysis that already sends transcript text to Gemini.
+    has_gemini_key = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+    meeting_state = MeetingState(entries, digest_function=gemini_digest if has_gemini_key else None)
     should_save = False
     console.print(f"文字转写将实时保存到：{transcript_path}")
-    whisper_model = os.environ.get("MEETAGENT_WHISPER_MODEL_ID", MODEL_ID)
+    if platform.system() == "Darwin":
+        whisper_model = os.environ.get("MEETAGENT_WHISPER_MODEL_ID", MODEL_ID)
+    else:
+        whisper_model = str(app_config.audio.model_path or "未设置（MEETAGENT_WHISPER_MODEL）")
     console.print(f"本地 Whisper 模型：{whisper_model}")
     language_labels = {"auto": "自动检测", "zh": "中文", "en": "英语", "de": "德语"}
     console.print(f"Whisper 识别语言：{language_labels.get(language, language)}")
@@ -1235,6 +1477,7 @@ async def run_demo(
             await _run_file(
                 file, entries, answers, keywords, transcript_path, language,
                 speaker_identifier=speaker_identifier, analyst=analyst, policy=policy,
+                meeting_state=meeting_state,
             )
         else:
             await _run_microphone(
@@ -1246,6 +1489,8 @@ async def run_demo(
                     if enable_live is None else enable_live
                 ),
                 external_stop=external_stop,
+                meeting_state=meeting_state,
+                share_transcript_with_live=live_config.share_transcript,
             )
         should_save = True
     except KeyboardInterrupt:

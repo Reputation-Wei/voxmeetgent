@@ -44,6 +44,10 @@ def _chunks(text: str, limit: int = 24_000) -> list[str]:
     return chunks
 
 
+# No client-side tools here; disabling AFC also silences the SDK warning.
+_NO_AFC = {"automatic_function_calling": {"disable": True}}
+
+
 def _language_name(language: str) -> str:
     return {"zh": "简体中文", "en": "English", "de": "Deutsch"}[language]
 
@@ -73,7 +77,7 @@ async def summarize_with_gemini(
             f"{chunk}"
         )
         response = await client.aio.models.generate_content(
-            model="gemini-3.8-flash", contents=prompt,
+            model="gemini-3.8-flash", contents=prompt, config=_NO_AFC,
         )
         if not response.text:
             raise RuntimeError(f"摘要分块 {index} 返回空内容。")
@@ -95,7 +99,7 @@ async def summarize_with_gemini(
         f"\n\nAgent 回答记录（JSON）：\n{answers_json}"
     )
     result = await client.aio.models.generate_content(
-        model="gemini-3.8-flash", contents=final_prompt,
+        model="gemini-3.8-flash", contents=final_prompt, config=_NO_AFC,
     )
     if not result.text:
         raise RuntimeError("最终纪要返回空内容。")
