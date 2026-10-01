@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib.util
 import os
 import platform
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -78,13 +77,22 @@ def diagnostics(config: AppConfig | None = None) -> list[tuple[str, bool, str]]:
         model = config.audio.model_path or (Path(os.getenv("MEETAGENT_WHISPER_MODEL"))
                                              if os.getenv("MEETAGENT_WHISPER_MODEL") else None)
         checks.append(("whisper.cpp 模型", bool(model and model.is_file()),
-                       str(model) if model else "设置 MEETAGENT_WHISPER_MODEL"))
-        checks.append(("whisper-server", shutil.which("whisper-server") is not None,
-                       shutil.which("whisper-server") or "未找到可执行程序"))
+                       str(model) if model else "设置 MEETAGENT_WHISPER_MODEL 或 [audio].model_path"))
+        checks.append(_whispercpp_gpu_check())
     return checks
+
+
+def _whispercpp_gpu_check() -> tuple[str, bool, str]:
+    """Report whether pywhispercpp was built with the ggml Vulkan backend."""
+    spec = importlib.util.find_spec("_pywhispercpp")
+    if spec is None or spec.origin is None:
+        return ("whisper.cpp GPU", False, "未安装 pywhispercpp")
+    if any(Path(spec.origin).parent.glob("libggml-vulkan.so*")):
+        return ("whisper.cpp GPU", True, "Vulkan 后端已编译")
+    return ("whisper.cpp GPU", False, "PyPI 轮子仅含 CPU；运行 scripts/build-whisper-vulkan.sh")
 
 
 def exit_code(checks: list[tuple[str, bool, str]]) -> int:
     """Return nonzero only for missing local runtime prerequisites."""
-    required = {"音频依赖", "说话人识别", "MLX Whisper", "whisper.cpp 模型", "whisper-server"}
+    required = {"音频依赖", "说话人识别", "MLX Whisper", "whisper.cpp 模型"}
     return 1 if any(not ok and name in required for name, ok, _ in checks) else 0

@@ -36,14 +36,23 @@ def _float_setting(name: str, default: float) -> float:
 def _linux_model(model_path: str):
     from pywhispercpp.model import Model
 
-    return Model(model_path, n_threads=os.cpu_count() or 4)
+    return Model(
+        model_path, n_threads=os.cpu_count() or 4,
+        redirect_whispercpp_logs_to=None, print_progress=False,
+    )
 
 
 class LocalWhisperBackend:
     """Run MLX Whisper on Apple Silicon or a cached whisper.cpp model on Linux."""
 
     def __init__(self, model_path: str | None = None, model_id: str | None = None) -> None:
-        self.model_path = model_path or os.environ.get("MEETAGENT_WHISPER_MODEL")
+        if model_path is None:
+            from meetagent.config import AppConfig
+
+            # Env var wins over [audio].model_path; AppConfig applies that order.
+            configured = AppConfig.load().audio.model_path
+            model_path = str(configured) if configured else None
+        self.model_path = model_path
         self.model_id = model_id or os.environ.get("MEETAGENT_WHISPER_MODEL_ID") or MODEL_ID
 
     def transcribe(self, audio: np.ndarray, language: str = "auto") -> tuple[str, str]:
@@ -104,7 +113,8 @@ class LocalWhisperBackend:
                 raise RuntimeError("缺少 pywhispercpp，请在 Python 3.12 环境执行 `uv sync`。") from exc
             if not self.model_path:
                 raise RuntimeError(
-                    "Linux 离线转写需要设置 MEETAGENT_WHISPER_MODEL，指向 whisper.cpp GGML 模型文件。"
+                    "Linux 转写需要设置 MEETAGENT_WHISPER_MODEL 或 config.toml 的 [audio].model_path，"
+                    "指向 whisper.cpp GGML 模型文件。"
                 )
             segments = _linux_model(self.model_path).transcribe(
                 audio, language=None if language == "auto" else language, translate=False,
