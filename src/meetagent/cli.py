@@ -90,6 +90,10 @@ def demo(
     aec: bool | None = typer.Option(
         None, "--aec/--no-aec", help="启用或关闭声学回声消除；默认读取配置",
     ),
+    reply: Literal["voice", "text"] | None = typer.Option(
+        None, "--reply",
+        help="voice 语音回答；text 只打印文字回答且不连接 Gemini Live（不上传会议音频）。默认读取配置",
+    ),
 ) -> None:
     """启动持续倾听、被点名语音问答、本地转写和会后总结。"""
     if out is None:
@@ -105,7 +109,8 @@ def demo(
         __import__("os").environ.get("GEMINI_API_KEY")
         or __import__("os").environ.get("GOOGLE_API_KEY")
     )
-    if not file and has_gemini_key and not consent_to_stream:
+    text_reply = (reply or AppConfig.load().live.reply) == "text"
+    if not file and has_gemini_key and not consent_to_stream and not text_reply:
         typer.echo(
             "错误：实时模式会将整场麦克风音频发送到 Gemini Live。取得与会者同意后，请添加 --consent-to-stream。",
             err=True,
@@ -119,7 +124,7 @@ def demo(
             analyze_claims=analyze_claims, intervention=intervention, aec_enabled=aec,
             summary_language=summary_language,
             obsidian_vault=obsidian_vault.expanduser() if obsidian_vault else None,
-            obsidian_folder=obsidian_folder,
+            obsidian_folder=obsidian_folder, reply=reply,
         ))
     except KeyboardInterrupt:
         pass

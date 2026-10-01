@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-MeetAgent is a local-first multilingual meeting assistant. It transcribes meetings on Apple Silicon Macs with local Whisper while saving the original audio and transcript. You can optionally connect Gemini Live so the agent can listen throughout a meeting and speak only when explicitly addressed. The project also includes a local web GUI and an Omarchy / Quickshell status-bar plugin.
+MeetAgent is a local-first multilingual meeting assistant. It transcribes meetings on Apple Silicon Macs with local Whisper while saving the original audio and transcript. You can optionally connect Gemini Live so the agent can listen throughout a meeting, answer when addressed, and search and speak when it hears a research, fact-check, logic-check, or summary keyword. The project also includes a local web GUI and an Omarchy / Quickshell status-bar plugin.
 
 > Before a meeting, tell participants that it will be recorded and transcribed, and obtain the required consent. MeetAgent sends the full meeting audio to Gemini Live only after you explicitly enable that option. Sending the transcript to Gemini for a summary is a separate choice.
 
@@ -12,7 +12,7 @@ MeetAgent is a local-first multilingual meeting assistant. It transcribes meetin
 - Uses local MLX Whisper `large-v3` by default on Apple Silicon macOS. Model weights are downloaded on first use.
 - Supports automatic language detection or Chinese, English, and German.
 - Uses voice embeddings to help label speakers; speaker names can be corrected after a meeting.
-- Gemini Live can listen continuously. The agent stays quiet until explicitly addressed, and you can interrupt spoken replies.
+- Gemini Live can listen continuously. The agent stays quiet until it is addressed or hears a trigger keyword ("is there related work", "is that true", "summarize", and Chinese/German equivalents), then searches and speaks its conclusion. You can interrupt spoken replies.
 - The local web GUI can start and stop meetings, show transcripts, correct speaker labels, and access meeting files.
 - The Omarchy Quickshell plugin shows meeting status and duration, provides recording controls, and links to the GUI.
 

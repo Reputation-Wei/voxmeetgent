@@ -1,5 +1,19 @@
 # Changelog
 
+## Phase 8 P1 — 2026-10-01
+
+### 已完成
+
+- 用户决定 Agent 参与方式为 B：点名或关键词直接触发，Agent 自发发言只能举手经批准（PLAN.md 第 6 节第 5 条、ADR-004 更新）。
+- MeetingState 共享会议状态：Analyst 上下文带真实说话人、较早讨论摘要（或原文回退）和已给结论；Live 增量接收同一份带说话人逐字稿与结论。
+- 关键词（研究、事实核查、逻辑检查、新增总结，中英德）无需点名即后台分析并播报一两句口语结论；本地转写在搜索期间不再停顿。
+- Linux：pywhispercpp Vulkan 构建脚本 `scripts/build-whisper-vulkan.sh`；B390 上转写约提速 5 倍；`[audio].model_path` 生效；doctor 检查 GPU 后端。
+- Omarchy 插件改用 Omarchy `Panel`/`KeyboardPanel` 组件，已在 Omarchy 实机加载、开始/停止录音。
+
+### 需要用户决定 / 实测
+
+- Live 上下文注入与“只听不说”spike（PLAN.md Phase 8 P1 第 6 项）需 Gemini key 在用户设备运行。
+
 ## Phase 0 continuation — 2026-09-29
 
 ### 已完成

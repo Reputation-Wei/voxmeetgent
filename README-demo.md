@@ -1,6 +1,6 @@
 # MeetAgent 最小 Demo（Phase D）
 
-这个 Demo 在 Apple Silicon Mac 上用本地 Whisper 转写会议音频，同时让 Gemini Live 持续倾听；Live 默认静默，只有用户点名提问时才语音回答。研究/事实核查关键词由 Gemini 搜索回答并播报，结束时生成 Markdown 纪要和 JSONL 转写。VAD 切出的每段语音会用本地 sherpa-onnx 声纹模型匹配说话人；未注册者会在本场会议内临时分配编号。
+这个 Demo 在 Apple Silicon Mac 上用本地 Whisper 转写会议音频，同时让 Gemini Live 持续倾听；Live 默认静默，用户点名提问时语音回答。研究、事实核查、逻辑检查和总结关键词无需点名，由 Gemini 搜索分析后播报，结束时生成 Markdown 纪要和 JSONL 转写。VAD 切出的每段语音会用本地 sherpa-onnx 声纹模型匹配说话人；未注册者会在本场会议内临时分配编号。
 
 实时 Live 收发与可打断播放已接入 Demo；仍需在用户的 M5 和实际会议环境验证端到端语音行为。持续倾听模式会把会议麦克风音频持续发送到 Gemini，启动前需明确提示并取得与会者同意；本地 Whisper 继续负责正式逐字稿。
 
@@ -73,7 +73,7 @@ uv run meetagent demo --out ~/Meetings --language zh
 uv run meetagent demo --out ~/Meetings --language zh --consent-to-stream
 ```
 
-可用 `--intervention` 选择策略：`on_request`（默认，仅在识别到“Agent，你怎么看？”或英文/德文对应呼叫后回答）、`silent`（完全不播报）或 `proactive`。为符合明确点名要求，**任何模式都不会允许 Agent 未经呼叫主动播报**；`proactive` 目前也受同一呼叫门控。可在 `~/.config/meetagent/config.toml` 配置，命令行参数优先：
+可用 `--intervention` 选择策略：`on_request`（默认，仅在识别到“Agent，你怎么看？”或英文/德文对应呼叫后回答）、`silent`（完全不播报）或 `proactive`。除 `silent` 外，点名提问和关键词（相关研究、事实核查、逻辑检查、总结，中英德，见 `src/meetagent/keywords.yaml`）都会触发播报；Agent 不会在无人请求时主动发言（后续“举手”机制需人批准，见 PLAN.md Phase 8）。可在 `~/.config/meetagent/config.toml` 配置，命令行参数优先：
 
 ```toml
 [live]
@@ -93,13 +93,13 @@ uv run meetagent demo --out ~/Meetings --consent-to-stream --intervention silent
 uv run meetagent demo --out ~/Meetings --language zh --consent-to-stream --analyze-claims
 ```
 
-麦克风音频会送入本地 VAD/Whisper；只有设置 key 并确认同意后才另外发送到 Gemini Live。Live 生成回答的唤醒依据由本地 Whisper 的完整 `large-v3` 识别结果提供：只有识别到“Agent，你怎么看？”才会发送点名文本并开放当前回合播放，减少对 Gemini 自己识别唤醒词的依赖。Agent 播报时可直接插话。研究、事实核查和逻辑检查请求须先满足同一明确点名规则。
+麦克风音频会送入本地 VAD/Whisper；只有设置 key 并确认同意后才另外发送到 Gemini Live。Live 生成回答的唤醒依据由本地 Whisper 的完整 `large-v3` 识别结果提供：只有识别到“Agent，你怎么看？”才会发送点名文本并开放当前回合播放，减少对 Gemini 自己识别唤醒词的依赖。Agent 播报时可直接插话。研究、事实核查、逻辑检查和总结关键词无需点名：分析在后台运行，不阻塞本地转写，完成后用一两句口语播报结论，完整结果和来源写入终端与逐字稿。
 
 `--language` 支持 `zh`、`en`、`de` 和 `auto`（默认）。以一种语言为主的会议可指定主语言；中英德频繁混说时建议用 `auto`，固定语言可能降低其他语言片段的识别效果。当前对 Whisper 输出增加了短音频/近静音筛选、段级静音概率/平均置信度/重复度过滤，以减少幻听；这会带来少量漏掉轻声短词的风险，阈值可再根据你的真实录音调校。完整 `large-v3` 仍无法保证逐字零错误：多人同时讲话、远场收音和噪声都可能导致漏字或串字；当前 mono 单声道输入无法恢复重叠人声各自的完整内容。原始 WAV 是核对依据，TXT/JSONL 保存模型实际识别结果。
 
 幻听抑制阈值可按录音情况用环境变量调整。默认偏严格；若真实语音被漏掉，可在启动会议前小步降低相应门限：`MEETAGENT_WHISPER_NO_SPEECH=0.65`、`MEETAGENT_WHISPER_LOGPROB=-1.2`、`MEETAGENT_WHISPER_COMPRESSION=2.4`。更高的静音门限和更低的 logprob 门限会保留更多片段，也可能让幻听回来。
 
-Linux 离线 WAV 还需设置 `MEETAGENT_WHISPER_MODEL` 指向本地 GGML 模型文件；Demo 当前不会自动下载 Linux 模型。
+Linux 需设置 `MEETAGENT_WHISPER_MODEL` 或 config.toml 的 `[audio] model_path` 指向本地 GGML 模型文件；Demo 当前不会自动下载 Linux 模型。Intel Arc 等 GPU 加速见 README 的 “Linux GPU 转写”。
 
 离线 WAV：
 

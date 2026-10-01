@@ -21,6 +21,7 @@ class MeetingRun:
     language: str
     summary_language: str
     live: bool
+    reply: str
     started_at: float
     stop_event: asyncio.Event
     task: asyncio.Task[None]
@@ -43,10 +44,16 @@ class MeetingService:
         summary_language: str = "zh", live: bool = False,
         consent_to_stream: bool = False,
         consent_to_summary_upload: bool = False,
+        reply: str | None = None,
     ) -> MeetingRun:
         async with self._lock:
             if self.active and not self.active.task.done():
                 raise RuntimeError("已有会议正在运行。")
+            reply = reply or self.config.live.reply
+            if reply not in {"voice", "text"}:
+                raise ValueError("reply 必须为 voice 或 text。")
+            if reply == "text" and live:
+                raise ValueError("文字回复模式不使用 Gemini Live；请关闭 Live 或改用语音回复。")
             if live and not consent_to_stream:
                 raise PermissionError("启用 Gemini Live 前必须确认与会者同意整场音频上传。")
             if live and not (self._has_api_key()):
@@ -70,12 +77,12 @@ class MeetingService:
                 run_demo(
                     destination, None, language=language, summary_language=summary_language,
                     enable_live=live, external_stop=stop_event, meeting_id=meeting_id,
-                    allow_gemini_summary=consent_to_summary_upload,
+                    allow_gemini_summary=consent_to_summary_upload, reply=reply,
                 ),
                 name=f"meeting-{meeting_id}",
             )
             run = MeetingRun(
-                meeting_id, destination, language, summary_language, live,
+                meeting_id, destination, language, summary_language, live, reply,
                 started_at, stop_event, task, transcript_path,
             )
             self.active = run
@@ -117,6 +124,7 @@ class MeetingService:
             return {
                 "state": "idle", "meeting_id": None, "elapsed_seconds": 0,
                 "output_dir": str(self.config.output.directory), "live": False,
+                "reply": self.config.live.reply,
                 "gemini_key_available": self._has_api_key(), "error": self.last_error,
             }
         task_done = run.task.done()
@@ -127,11 +135,33 @@ class MeetingService:
             "state": state, "meeting_id": run.meeting_id,
             "elapsed_seconds": max(0, int(asyncio.get_running_loop().time() - run.started_at)),
             "output_dir": str(run.output_dir), "transcript": str(run.transcript_path),
-            "live": run.live, "live_connected": None,
+            "live": run.live, "reply": run.reply, "live_connected": None,
             "gemini_key_available": self._has_api_key(), "error": self.last_error,
+            "last_agent": self._last_agent_entry(run.transcript_path.with_suffix(".jsonl")),
             "audio_path": str(run.transcript_path.with_suffix(".wav")),
             "summary_path": str(run.transcript_path.with_suffix(".md")),
         }
+
+    @staticmethod
+    def _last_agent_entry(path: Path, tail_bytes: int = 65_536) -> dict[str, Any] | None:
+        """Latest Agent answer, read from the end of the JSONL so polling stays cheap."""
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, 2)
+                size = handle.tell()
+                handle.seek(max(0, size - tail_bytes))
+                lines = handle.read().decode("utf-8", errors="ignore").splitlines()
+        except OSError:
+            return None
+        for line in reversed(lines):
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # the first line of the tail may be cut mid-record
+            if entry.get("speaker") == "Agent":
+                return {"time": entry.get("time", ""), "text": entry.get("text", ""),
+                        "source": entry.get("source", "")}
+        return None
 
     def transcript(self, meeting_id: str) -> list[dict[str, Any]]:
         run = self._find_meeting(meeting_id)

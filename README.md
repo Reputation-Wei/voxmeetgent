@@ -2,7 +2,7 @@
 
 [English](README.en.md) | 中文
 
-MeetAgent 是一款本地优先的多语言会议助手：在 Apple Silicon Mac 上使用本机 Whisper 转写会议，持续保存原始音频和逐字稿；可选连接 Gemini Live，让 Agent 持续倾听，并且只在被明确点名提问时回答。项目也提供本机 Web GUI，以及 Omarchy / Quickshell 状态栏插件。
+MeetAgent 是一款本地优先的多语言会议助手：在 Apple Silicon Mac 上使用本机 Whisper 转写会议，持续保存原始音频和逐字稿；可选连接 Gemini Live，让 Agent 持续倾听：被点名提问时回答，说出研究、事实核查、逻辑检查或总结关键词时自动搜索并播报结论。项目也提供本机 Web GUI，以及 Omarchy / Quickshell 状态栏插件。
 
 > 开会前请告知与会者正在录音和转写，并取得必要同意。只有在另外明确授权后，MeetAgent 才会把整场音频发送到 Gemini Live；会后把逐字稿发送给 Gemini 生成纪要也是单独选择，默认关闭。
 
@@ -12,7 +12,7 @@ MeetAgent 是一款本地优先的多语言会议助手：在 Apple Silicon Mac 
 - Apple Silicon macOS 默认使用本机 MLX Whisper `large-v3`；模型首次使用时自动下载。
 - 支持自动识别或指定中文、英语、德语。
 - 声纹辅助标记发言人，并支持会后修正说话人。
-- Gemini Live 可持续倾听；Agent 默认安静，只在明确被点名后回答，回答可被插话打断。
+- Gemini Live 可持续倾听；Agent 默认安静，被点名或听到关键词（“有没有相关研究”“这是真的吗”“总结一下”等，中英德）时回答，回答可被插话打断。
 - 本机 Web GUI 可开始/结束会议、查看转写、修正说话人和访问会议文件。
 - Omarchy Quickshell 插件提供状态栏状态、计时、快速录音控制和 GUI 入口。
 
@@ -22,7 +22,18 @@ MeetAgent 是一款本地优先的多语言会议助手：在 Apple Silicon Mac 
 
 - macOS Apple Silicon、Python 3.12、[`uv`](https://docs.astral.sh/uv/) 和 `ffmpeg`。
 - `GEMINI_API_KEY` 可选：本地录音/转写不需要它；Gemini Live 和 Gemini 纪要需要它。
-- Linux 支持状态及 Omarchy 插件安装说明见 [`omarchy-plugin/README.md`](omarchy-plugin/README.md)。Linux Whisper 目前需要用户提供 whisper.cpp GGML 模型。
+- Linux 支持状态及 Omarchy 插件安装说明见 [`omarchy-plugin/README.md`](omarchy-plugin/README.md)。Linux Whisper 目前需要用户提供 whisper.cpp GGML 模型，通过 `MEETAGENT_WHISPER_MODEL` 或 `~/.config/meetagent/config.toml` 的 `[audio] model_path` 指定。
+
+### Linux GPU 转写（Intel Arc / Vulkan）
+
+PyPI 的 `pywhispercpp` 轮子只含 CPU 后端。在有 Vulkan 驱动的 Linux（如 Omarchy + Intel Arc B390）上，用脚本在项目 `.venv` 内重新编译带 Vulkan 的版本：
+
+```bash
+./scripts/build-whisper-vulkan.sh
+uv run meetagent doctor   # 应显示 “whisper.cpp GPU: Vulkan 后端已编译”
+```
+
+需要 `vulkan-intel`、`shaderc`、`cmake`、`gcc`；系统未装 `vulkan-headers`/`spirv-headers` 时，脚本会把头文件下载到 `~/.cache/meetagent/vulkan-sdk`，无需 root。B390 上 60 秒中文录音的转写从 CPU 的 19.3 秒降到 3.8 秒（large-v3-turbo），完整 large-v3 为 3.3 秒。`uv sync --reinstall` 或重建 `.venv` 后需重新运行脚本。
 
 macOS 安装依赖并同步项目：
 
