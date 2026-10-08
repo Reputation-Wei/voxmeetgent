@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.voxprogent.meetagent",
   "name": "MeetAgent",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "voxprogent",
   "description": "Omarchy 状态栏里的本地会议录制控制。",
   "kinds": [
@@ -21,7 +21,9 @@
       "serviceCommand": "meetagent gui --no-open",
       "outputDirectory": "~/Meetings",
       "language": "auto",
-      "summaryLanguage": "zh"
+      "summaryLanguage": "zh",
+      "followCommand": "meetagent follow",
+      "openFollowOnStart": true
     },
     "schema": [
       {
@@ -35,6 +37,18 @@
         "type": "path",
         "label": "默认保存目录",
         "defaultValue": "~/Meetings"
+      },
+      {
+        "key": "openFollowOnStart",
+        "type": "boolean",
+        "label": "开始录音时打开实时转写窗口",
+        "defaultValue": true
+      },
+      {
+        "key": "followCommand",
+        "type": "string",
+        "label": "实时转写窗口命令",
+        "defaultValue": "meetagent follow"
       }
     ]
   }

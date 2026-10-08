@@ -17,6 +17,8 @@ config.toml
 
 # Meeting artifacts and model data
 *.wav
+# Fixed Gemini voice sample used by `meetagent calibrate-echo` (no meeting audio)
+!src/meetagent/audio/calibration_speech.wav
 *.mp3
 *.m4a
 *.flac

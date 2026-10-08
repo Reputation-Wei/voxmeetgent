@@ -19,6 +19,11 @@ from meetagent.ui.service import MeetingService
 WEB_ROOT = Path(__file__).with_name("web")
 
 
+class ApiKeyRequest(BaseModel):
+    # Accepted only over the loopback, token-protected API; never echoed back.
+    api_key: str = Field(min_length=10, max_length=512)
+
+
 class StartMeetingRequest(BaseModel):
     output_dir: str | None = None
     language: str = Field(default="auto", pattern="^(auto|zh|en|de)$")
@@ -71,6 +76,19 @@ def create_app(service: MeetingService | None = None, token: str | None = None) 
     @app.get("/api/status")
     async def status():
         return service.status()
+
+    @app.post("/api/settings/gemini-key")
+    async def set_gemini_key(payload: ApiKeyRequest):
+        from meetagent.keystore import store_api_key, validate_api_key
+
+        try:
+            await validate_api_key(payload.api_key)
+            store_api_key(payload.api_key)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        return {"gemini_key_available": True}
 
     @app.post("/api/meetings", status_code=202)
     async def start_meeting(payload: StartMeetingRequest):

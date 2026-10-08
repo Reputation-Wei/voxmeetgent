@@ -45,14 +45,26 @@ def _linux_model(model_path: str):
 class LocalWhisperBackend:
     """Run MLX Whisper on Apple Silicon or a cached whisper.cpp model on Linux."""
 
-    def __init__(self, model_path: str | None = None, model_id: str | None = None) -> None:
-        if model_path is None:
+    def __init__(
+        self, model_path: str | None = None, model_id: str | None = None,
+        vocabulary: str | None = None,
+    ) -> None:
+        if model_path is None or vocabulary is None:
             from meetagent.config import AppConfig
 
-            # Env var wins over [audio].model_path; AppConfig applies that order.
-            configured = AppConfig.load().audio.model_path
-            model_path = str(configured) if configured else None
+            config = AppConfig.load()
+            if model_path is None:
+                # Env var wins over [audio].model_path; AppConfig applies that order.
+                configured = config.audio.model_path
+                model_path = str(configured) if configured else None
+            if vocabulary is None:
+                vocabulary = ", ".join(config.agent.names)
         self.model_path = model_path
+        # A short comma-separated name list as Whisper's initial prompt makes it
+        # spell the Agent's names correctly. Tested on real zh recordings: a full
+        # sentence prompt also fixed the name but swallowed a whole segment;
+        # the bare list did not (PLAN.md Phase 8 P2).
+        self.vocabulary = vocabulary or None
         self.model_id = model_id or os.environ.get("MEETAGENT_WHISPER_MODEL_ID") or MODEL_ID
 
     def transcribe(self, audio: np.ndarray, language: str = "auto") -> tuple[str, str]:
@@ -76,6 +88,7 @@ class LocalWhisperBackend:
                 audio,
                 path_or_hf_repo=self.model_id,
                 language=None if language == "auto" else language,
+                initial_prompt=self.vocabulary,
                 task="transcribe",
                 condition_on_previous_text=False,
                 temperature=0.0,
@@ -120,6 +133,7 @@ class LocalWhisperBackend:
                 audio, language=None if language == "auto" else language, translate=False,
                 no_speech_thold=no_speech_threshold, logprob_thold=logprob_threshold,
                 entropy_thold=compression_threshold,
+                initial_prompt=self.vocabulary or "",
             )
             text = " ".join(segment.text.strip() for segment in segments).strip()
             normalized = re.sub(r"\W+", "", text.casefold())

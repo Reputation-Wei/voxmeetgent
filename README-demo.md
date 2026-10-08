@@ -51,6 +51,10 @@ aec_delay_ms = 20
 
 ## 设置 Gemini API key
 
+推荐方式：在 Omarchy 状态栏 MeetAgent 面板的“Gemini API key”处粘贴并保存，或在终端执行 `secret-tool store --label="Gemini API key" service gemini user meetagent`（出现 Password 提示后粘贴）。MeetAgent 启动时会自动从系统钥匙环读取；环境变量 `GEMINI_API_KEY` 仍然优先。
+
+默认回答方式为文字：点名或关键词触发的回答显示在终端/面板，并实时追加到会议目录的 `meeting-…agent.md`。需要语音回答时用 `--reply voice` 或面板切换（外放请先运行 `meetagent calibrate-echo --write`）。
+
 在 [Google AI Studio](https://aistudio.google.com/apikey) 创建 Gemini Developer API key，然后在当前终端设置：
 
 ```bash
@@ -116,6 +120,23 @@ uv run meetagent transcribe --file meeting.wav --out ~/Meetings --language auto
 ```
 
 该命令生成原始 WAV、可读 `.txt`、结构化 `.jsonl` 和本地逐字稿 `.md`。
+
+### 称呼 Agent 与外放回声（Phase 8 P2）
+
+Agent 的名字可在 `~/.config/meetagent/config.toml` 配置，这些名字也会提示 Whisper 正确识别：
+
+```toml
+[agent]
+names = ["Agent", "助手", "MeetAgent"]
+followup_seconds = 25   # Agent 回答后这段时间内追问无需再点名
+classifier = true       # 有 key 时由 Gemini 区分“在问 Agent”和“只是提到 Agent”
+```
+
+不戴耳机使用语音回答前，以开会时的扬声器音量运行一次回声校准，并写入推荐的插话门限和 AEC 延迟：
+
+```bash
+uv run meetagent calibrate-echo --write
+```
 
 ## 会后纪要（Phase 5）
 
