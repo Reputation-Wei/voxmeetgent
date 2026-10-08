@@ -19,7 +19,10 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+if TYPE_CHECKING:
+    from meetagent.agent.addressing import AddressDetector
 
 # Sources that represent what attendees actually said. Agent output is kept
 # separately so the Agent does not fact-check or summarize itself as a speaker.
@@ -52,6 +55,8 @@ class MeetingState:
     recent_seconds: float = 120.0
     digest: str = ""
     conclusions: list[AgentConclusion] = field(default_factory=list)
+    # Who-is-talking-to-the-Agent detection and its follow-up window (P2).
+    addressing: AddressDetector | None = None
     _digested_until: float = 0.0
     _digest_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 

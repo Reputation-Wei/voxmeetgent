@@ -14,6 +14,9 @@ Panel {
 
   readonly property string apiBase: "http://127.0.0.1:" + setting("port", 8765)
   readonly property string serviceCommand: setting("serviceCommand", "meetagent gui --no-open")
+  // Terminal window with the live transcript and the Agent's text answers.
+  readonly property string followCommand: setting("followCommand", "meetagent follow")
+  readonly property bool openFollowOnStart: setting("openFollowOnStart", true)
 
   property string token: ""
   // Not `state`: that would shadow QtQuick's Item.state.
@@ -32,6 +35,11 @@ Panel {
   property string replyMode: "voice"
   property bool replyChosen: false
   property string lastAgentText: ""
+  // The key itself never lives in the plugin: it is sent once to the local
+  // service, which validates it and stores it in the system keyring.
+  property bool geminiKeyAvailable: false
+  property bool keyEditing: false
+  property bool keySaving: false
   property string lastAgentTime: ""
   property bool consentToStream: false
   property bool consentToSummaryUpload: false
@@ -93,6 +101,7 @@ Panel {
       elapsedSeconds = result.elapsed_seconds || 0
       // Follow the configured default until the user picks a mode here.
       if (!replyChosen && !active && result.reply) replyMode = result.reply
+      geminiKeyAvailable = result.gemini_key_available === true
       lastAgentText = result.last_agent ? String(result.last_agent.text || "") : ""
       lastAgentTime = result.last_agent ? String(result.last_agent.time || "") : ""
     })
@@ -141,6 +150,21 @@ Panel {
       if (ok) {
         meetingId = result.meeting_id || ""
         refreshStatus()
+        if (openFollowOnStart) openFollowWindow()
+      }
+    })
+  }
+
+  function saveGeminiKey(key) {
+    if (keySaving || key.trim().length === 0) return
+    errorText = ""
+    keySaving = true
+    request("POST", "/api/settings/gemini-key", { api_key: key.trim() }, function(ok) {
+      keySaving = false
+      if (ok) {
+        geminiKeyAvailable = true
+        keyEditing = false
+        keyField.text = ""
       }
     })
   }
@@ -152,6 +176,12 @@ Panel {
       busy = false
       if (ok) refreshStatus()
     })
+  }
+
+  function openFollowWindow() {
+    // Focuses the window if it is already open, otherwise opens it in the
+    // default terminal with Omarchy styling.
+    if (bar) bar.run("omarchy-launch-or-focus-tui --app-id=io.github.voxprogent.meetagent.follow " + followCommand)
   }
 
   function openGui() {
@@ -324,8 +354,72 @@ Panel {
             width: parent.width
             textFormat: Text.PlainText
             text: root.replyMode === "text"
-              ? "回答只显示在下方和逐字稿中，不连接 Gemini Live、不上传会议音频。"
-              : "语音播报请戴耳机：外放时麦克风会录到 Agent 的声音并把它打断。"
+              ? "回答显示在下方，并实时写入会议目录的 meeting-…agent.md；不连接 Gemini Live、不上传会议音频。"
+              : "外放前请运行 meetagent calibrate-echo --write 校准回声，或戴耳机；否则麦克风录到 Agent 的声音会把它打断。"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          PanelSeparator { foreground: root.foreground }
+
+          PanelSectionHeader {
+            text: "Gemini API key"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+          Row {
+            visible: root.geminiKeyAvailable && !root.keyEditing
+            width: parent.width
+            spacing: Style.space(8)
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width - changeKey.width - parent.spacing
+              textFormat: Text.PlainText
+              text: "已设置（保存在系统钥匙环）"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+            Button {
+              id: changeKey
+              text: "更换"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              bordered: true
+              enabled: !root.active
+              onClicked: root.keyEditing = true
+            }
+          }
+          Row {
+            visible: !root.geminiKeyAvailable || root.keyEditing
+            width: parent.width
+            spacing: Style.space(8)
+            TextField {
+              id: keyField
+              width: parent.width - saveKey.width - parent.spacing
+              password: true
+              placeholderText: "粘贴 AI Studio 的 API key"
+              foreground: root.foreground
+              enabled: !root.keySaving
+              onAccepted: root.saveGeminiKey(text)
+            }
+            Button {
+              id: saveKey
+              text: root.keySaving ? "验证中…" : "保存"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              bordered: true
+              enabled: !root.keySaving && keyField.text.trim().length > 0
+              onClicked: root.saveGeminiKey(keyField.text)
+            }
+          }
+          Text {
+            visible: !root.geminiKeyAvailable
+            width: parent.width
+            textFormat: Text.PlainText
+            text: "没有 key 时只做本地录音和转写；Agent 的核查、研究、总结和回答需要 key。"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -387,6 +481,14 @@ Panel {
               bordered: true
               onClicked: root.openGui()
             }
+          }
+          Button {
+            width: parent.width
+            text: "实时转写窗口（转写与 Agent 回答）"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            bordered: true
+            onClicked: { root.openFollowWindow(); root.close() }
           }
         }
 

@@ -21,6 +21,7 @@ import numpy as np
 import yaml
 from meetagent.agent.analyst import GeminiAnalyst
 from meetagent.agent.intervention import InterventionPolicy
+from meetagent.agent.addressing import AddressDetector, gemini_classify
 from meetagent.agent.meeting_state import MeetingState, gemini_digest
 from meetagent.agent.summarizer import local_fallback_summary, persist_summary, summarize_with_gemini
 from rich.console import Console
@@ -37,12 +38,14 @@ SAMPLE_RATE = 16_000
 LIVE_MODEL_ID = "gemini-3.8-live"
 LIVE_SAMPLE_RATE = 16_000
 PLAYBACK_SAMPLE_RATE = 24_000
+AEC_DEBUG_MAX_BLOCKS = 3 * 60 * SAMPLE_RATE // 512  # about 3 minutes of 512-sample blocks
 
 
 class _PlaybackBuffer:
     """Thread-safe PCM queue; local speech clears it before the server reply arrives."""
 
-    def __init__(self, echo_reference: PlaybackReference | None = None) -> None:
+    def __init__(self, echo_reference: PlaybackReference | None = None, gain: float = 1.0) -> None:
+        self._gain = gain
         self._chunks: deque[np.ndarray] = deque()
         self._current: np.ndarray | None = None
         self._offset = 0
@@ -51,9 +54,12 @@ class _PlaybackBuffer:
         self._local_speech_latched = False
         self._response_authorized = False
         self._echo_reference = echo_reference
+        # PortAudio status flags; an underflow plays silence the AEC
+        # reference does not contain, shifting echo vs. reference.
+        self.output_underflows = 0
 
     def add(self, pcm_bytes: bytes) -> None:
-        pcm = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) / 32768.0
+        pcm = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) * (self._gain / 32768.0)
         if pcm.size:
             with self._lock:
                 if self._response_authorized:
@@ -108,6 +114,8 @@ class _PlaybackBuffer:
         self._speaking = False
 
     def callback(self, outdata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
+        if status and status.output_underflow:
+            self.output_underflows += 1
         outdata.fill(0)
         written = 0
         with self._lock:
@@ -127,6 +135,50 @@ class _PlaybackBuffer:
             # The AEC reference must match what the output device was given,
             # including silence while no Agent response is queued.
             self._echo_reference.write_24k(outdata[:, 0])
+
+
+class _BargeInDetector:
+    """Decide when mic energy during Agent playback is a real interruption.
+
+    Laptop speaker echo reaches the level of real speech (measured RMS 0.13
+    vs. 0.10–0.42 on 2026-10-01), so a single loud frame is not enough: the
+    level must stay above `threshold` for `hold_seconds` while the Agent is
+    speaking. After firing, it re-arms once the mic is quiet again.
+    """
+
+    def __init__(
+        self, threshold: float, hold_seconds: float, quiet_threshold: float,
+        rearm_seconds: float = 0.35,
+    ) -> None:
+        self.threshold = threshold
+        self.hold_seconds = hold_seconds
+        self.quiet_threshold = quiet_threshold
+        self.rearm_seconds = rearm_seconds
+        self.latched = False
+        self._loud_since: float | None = None
+        self._quiet_since: float | None = None
+
+    def update(self, rms: float, now: float, agent_speaking: bool) -> str | None:
+        """Return "barge_in" when playback should stop, "rearm" when it re-arms."""
+        if self.latched:
+            if rms >= self.quiet_threshold:
+                self._quiet_since = None
+                return None
+            self._quiet_since = self._quiet_since or now
+            if now - self._quiet_since >= self.rearm_seconds:
+                self.latched = False
+                self._quiet_since = None
+                return "rearm"
+            return None
+        if not agent_speaking or rms < self.threshold:
+            self._loud_since = None
+            return None
+        self._loud_since = self._loud_since or now
+        if now - self._loud_since >= self.hold_seconds:
+            self.latched = True
+            self._loud_since = None
+            return "barge_in"
+        return None
 
 
 class _LiveCallGate:
@@ -182,11 +234,14 @@ class _LiveCallGate:
         self._sent_at = None
         return False
 
-    def on_turn_complete(self) -> None:
+    def on_turn_complete(self) -> bool:
+        """Return True when this turn completed the reply to a call."""
         if self._sent_at is not None and not self._reply_started:
-            return  # an earlier turn ended; the reply to the call is still coming
+            return False  # an earlier turn ended; the reply to the call is still coming
+        replied = self._sent_at is not None
         self._sent_at = None
         self._playback.finish_response()
+        return replied
 
 
 def _contains_authorized_call(text: str) -> bool:
@@ -537,6 +592,7 @@ async def _run_live_voice(
     entries: list[dict[str, Any]], transcript_path: Path, meeting_started: float,
     policy: InterventionPolicy,
     meeting_state: MeetingState | None = None,
+    addressing: AddressDetector | None = None,
 ) -> None:
     """Keep Gemini Live listening and playing only explicitly requested replies."""
     from google.genai import types
@@ -624,8 +680,8 @@ async def _run_live_voice(
                         call_gate.call_sent()
                         await session.send_realtime_input(
                             text=(
-                                "本地高精度 Whisper 已确认与会者明确呼叫 Agent。"
-                                f"呼叫原话是：{direct_call}。请结合当前会议上下文，用原语言简短回答。"
+                                "本地高精度 Whisper 已确认与会者在对 Agent 说话（点名或追问）。"
+                                f"原话是：{direct_call}。请结合当前会议上下文，用原语言简短回答。"
                             ),
                         )
                     try:
@@ -679,7 +735,8 @@ async def _run_live_voice(
                             if content.turn_complete:
                                 save_agent_turn()
                                 console.print()
-                                call_gate.on_turn_complete()
+                                if call_gate.on_turn_complete() and addressing is not None:
+                                    addressing.note_agent_reply()
                     if received == 0:
                         await asyncio.sleep(0.05)
 
@@ -891,6 +948,35 @@ async def _write_summary(
     return path, generated_by_gemini
 
 
+_TRIGGER_TITLES = {
+    "ask": "回答提问", "fact_check": "事实核查", "logic_check": "逻辑检查",
+    "research": "相关研究", "summarize": "讨论总结",
+}
+
+
+def _append_agent_markdown(
+    path: Path, elapsed_seconds: float, trigger_kind: str, request_text: str,
+    answer: str, links: list[str], titles: list[str],
+) -> None:
+    """Append one Agent answer to <meeting>.agent.md as soon as it exists."""
+    minutes, seconds = divmod(max(0, int(elapsed_seconds)), 60)
+    lines = []
+    if not path.exists():
+        lines += [f"# Agent 回答 · {path.stem.removesuffix('.agent')}", ""]
+    lines += [
+        f"## [{minutes:02d}:{seconds:02d}] {_TRIGGER_TITLES.get(trigger_kind, trigger_kind)}",
+        "", f"> {request_text.strip()}", "", answer.strip(), "",
+    ]
+    if links:
+        lines.append("来源：")
+        lines += [
+            f"- [{(titles[i] if i < len(titles) else '') or url}]({url})" for i, url in enumerate(links)
+        ]
+        lines.append("")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
 # One spoken answer at a time; concurrent analyses queue here before playback.
 _speech_lock = asyncio.Lock()
 
@@ -939,6 +1025,12 @@ async def _handle_trigger(
             _record_agent_utterance(
                 answer, entries, transcript_path, meeting_started, source="analyst",
             )
+            agent_markdown = transcript_path.with_suffix(".agent.md")
+            _append_agent_markdown(
+                agent_markdown, time.time() - meeting_started, trigger_kind, request_text,
+                answer, links, list(details.get("source_titles") or []),
+            )
+            console.print(f"[dim]已追加到 {agent_markdown}[/dim]")
         # Keyword requests speak without a name call (PLAN.md Phase 8, decision 5).
         reason = "call" if directly_addressed else "keyword"
         may_speak = policy.may_speak(reason) if policy is not None else True
@@ -946,6 +1038,8 @@ async def _handle_trigger(
             console.print("[dim]Agent 正在语音回答…[/dim]")
             async with _speech_lock:
                 await _speak(spoken or answer, playback=playback)
+        if state.addressing is not None:
+            state.addressing.note_agent_reply()
         elif policy is not None and policy.config.reply == "text":
             console.print("[dim]文字回复模式：回答已显示并写入逐字稿，不播报。[/dim]")
         else:
@@ -1029,7 +1123,17 @@ async def _process_audio(
     if not run_triggers:
         return
     kind = _trigger(text, keywords)
-    addressed = _contains_authorized_call(text)
+    detector = meeting_state.addressing if meeting_state is not None else None
+    if kind is not None:
+        # Keywords trigger on their own; no classifier call needed.
+        addressed = detector.mentions_name(text) if detector else _contains_authorized_call(text)
+    elif detector is not None:
+        decision = await detector.decide(text, context=meeting_state.recent_transcript(seconds=60))
+        addressed = decision.addressed
+        if decision.kind != "none":
+            console.print(f"[dim]称呼判断：{decision.kind}（{decision.source}）[/dim]")
+    else:
+        addressed = _contains_authorized_call(text)
     if addressed and kind is None:
         if live_calls is not None:
             if policy is not None and policy.authorize_live_turn(True):
@@ -1163,7 +1267,13 @@ async def _run_microphone(
             console.print(f"[green]WebRTC AEC 已启用（参考延迟 {aec_delay_ms} ms）。[/green]")
         except RuntimeError as exc:
             console.print(f"[yellow]{exc} 本次会议将不启用声学回声消除。[/yellow]")
-    playback = _PlaybackBuffer(echo_reference)
+    playback = _PlaybackBuffer(echo_reference, gain=policy.config.playback_gain)
+    input_overflows = 0
+    # MEETAGENT_AEC_DEBUG=1 keeps raw mic, AEC reference and AEC output for the
+    # first minutes in <meeting>.aec.npz to diagnose echo cancellation.
+    aec_debug: list[tuple[np.ndarray, np.ndarray, np.ndarray, bool]] | None = (
+        [] if os.environ.get("MEETAGENT_AEC_DEBUG") == "1" else None
+    )
     loop = asyncio.get_running_loop()
     started = time.monotonic()
     meeting_started = time.time()
@@ -1175,8 +1285,11 @@ async def _run_microphone(
     audio_writer.setsampwidth(2)
     audio_writer.setframerate(SAMPLE_RATE)
     last_audio_flush = time.monotonic()
-    local_speech_latched = False
-    below_threshold_since: float | None = None
+    barge_in = _BargeInDetector(
+        threshold=policy.config.barge_in_threshold or policy.config.rms_threshold,
+        hold_seconds=policy.config.barge_in_ms / 1000,
+        quiet_threshold=policy.config.rms_threshold,
+    )
     dropped_live_chunks = 0
     claim_analysis_task: asyncio.Task[None] | None = None
 
@@ -1215,35 +1328,38 @@ async def _run_microphone(
 
     def callback(indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
         nonlocal echo_canceller
-        nonlocal last_audio_flush, local_speech_latched, below_threshold_since
-        nonlocal dropped_live_chunks
+        nonlocal last_audio_flush
+        nonlocal dropped_live_chunks, input_overflows
         if status:
+            if status.input_overflow:
+                input_overflows += 1
             console.print(f"[yellow]音频状态：{status}[/yellow]")
         microphone = indata[:, 0].copy()
+        # Input streams sometimes start with garbage frames far outside [-1, 1]
+        # (a constant ~2.9 was measured). Treat them as silence so they cannot
+        # throw off the AEC, VAD or Live; real microphone audio never gets there.
+        if not np.all(np.isfinite(microphone)) or np.max(np.abs(microphone)) > 1.5:
+            microphone = np.zeros_like(microphone)
         data = microphone.copy()
         raw_pcm = (np.clip(microphone, -1.0, 1.0) * 32767).astype("<i2")
         if echo_canceller is not None and echo_reference is not None:
             try:
-                data = echo_canceller.process(data, echo_reference.read(frames))
+                reference = echo_reference.read(frames)
+                data = echo_canceller.process(data, reference)
+                if aec_debug is not None and len(aec_debug) < AEC_DEBUG_MAX_BLOCKS:
+                    aec_debug.append((microphone.copy(), reference, data.copy(), playback.is_speaking()))
             except Exception as exc:
                 console.print(f"[yellow]AEC 处理失败，后续音频改用原始麦克风输入：{exc}[/yellow]")
                 echo_canceller = None
         pcm = (np.clip(data, -1.0, 1.0) * 32767).astype("<i2")
         now = time.monotonic()
         rms = float(np.sqrt(np.mean(data * data)))
-        if rms >= policy.config.rms_threshold:
-            below_threshold_since = None
-            if playback.is_speaking() and not local_speech_latched:
-                local_speech_latched = playback.local_barge_in()
-                if local_speech_latched:
-                    console.print("[dim]检测到你在说话，已立即停止 Agent 播放。[/dim]")
-        elif local_speech_latched:
-            if below_threshold_since is None:
-                below_threshold_since = now
-            elif now - below_threshold_since >= 0.35:
-                local_speech_latched = False
-                below_threshold_since = None
-                playback.rearm_after_silence()
+        agent_speaking = playback.is_speaking()
+        event = barge_in.update(rms, now, agent_speaking)
+        if event == "barge_in" and playback.local_barge_in():
+            console.print("[dim]检测到你在说话，已立即停止 Agent 播放。[/dim]")
+        elif event == "rearm":
+            playback.rearm_after_silence()
         # Commit the valid WAV header and original mic data on every callback;
         # fsync below bounds unsaved audio if the process is interrupted.
         audio_writer.writeframes(raw_pcm.tobytes())
@@ -1251,7 +1367,13 @@ async def _run_microphone(
             audio_writer._file.flush()
             os.fsync(audio_writer._file.fileno())
             last_audio_flush = now
-        live_pcm = pcm.tobytes()
+        # Half duplex towards Live: while the Agent is speaking and nobody has
+        # barged in, send silence so Live's own VAD does not take the speaker
+        # echo for an interruption (it did on 2026-10-01).
+        if agent_speaking and not barge_in.latched:
+            live_pcm = bytes(len(pcm) * 2)
+        else:
+            live_pcm = pcm.tobytes()
 
         def enqueue() -> None:
             nonlocal dropped_live_chunks
@@ -1328,6 +1450,7 @@ async def _run_microphone(
                         entries, transcript_path, meeting_started,
                         policy,
                         meeting_state if share_transcript_with_live else None,
+                        meeting_state.addressing,
                     ),
                     name="continuous-live-voice",
                 )
@@ -1405,6 +1528,19 @@ async def _run_microphone(
                         console.print(f"[yellow]Live 会话结束时出错：{exc}[/yellow]")
         if dropped_live_chunks:
             console.print(f"[yellow]Live 上行过载，丢弃了 {dropped_live_chunks} 个最旧音频块。[/yellow]")
+        console.print(
+            f"[dim]音频回调统计：输入溢出 {input_overflows} 次，播放欠载 {playback.output_underflows} 次。[/dim]"
+        )
+        if aec_debug:
+            debug_path = transcript_path.with_suffix(".aec.npz")
+            np.savez_compressed(
+                debug_path,
+                raw=np.concatenate([block[0] for block in aec_debug]),
+                reference=np.concatenate([block[1] for block in aec_debug]),
+                output=np.concatenate([block[2] for block in aec_debug]),
+                agent_speaking=np.array([block[3] for block in aec_debug]),
+            )
+            console.print(f"[dim]AEC 诊断数据已保存：{debug_path}[/dim]")
     finally:
         audio_writer.close()
         if owns_signal_handler:
@@ -1461,7 +1597,13 @@ async def run_demo(
     # Shared working memory for Analyst and Live. The digest only calls Gemini
     # right before an analysis that already sends transcript text to Gemini.
     has_gemini_key = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-    meeting_state = MeetingState(entries, digest_function=gemini_digest if has_gemini_key else None)
+    meeting_state = MeetingState(
+        entries, digest_function=gemini_digest if has_gemini_key else None,
+        addressing=AddressDetector(
+            app_config.agent.names, app_config.agent.followup_seconds,
+            classify=gemini_classify if has_gemini_key and app_config.agent.classifier else None,
+        ),
+    )
     should_save = False
     console.print(f"文字转写将实时保存到：{transcript_path}")
     if platform.system() == "Darwin":

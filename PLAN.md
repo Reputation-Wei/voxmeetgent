@@ -373,6 +373,14 @@ Live 会话管理（压缩、resumption、断线重连、goAway 处理）；Inte
 
 **P2 自然称呼与对话窗口**：用小模型判断一句话是否对 Agent 说（可配置 Agent 名称，中英德）；回答后保留约 20–30 秒追问窗口，期间无需重新点名；按 P1 spike 结论确定 Live 模式。
 
+**P2 实现进度（2026-10-01）**：
+- 称呼识别 `agent/addressing.py`：`[agent] names`（默认 Agent、助手、MeetAgent）同时作为 Whisper initial prompt。实测 3 场会议 13 段录音：名字列表提示把“A陣盾你怎麼看”纠正为“Agent 你怎么看”且无段落丢失；整句提示虽也纠正名字，但吞掉了一整段“你怎么看”，故不用。两级判断：本地按名字/追问窗口粗筛，未命中不调用 API；名字位于句首或紧接“你/逗号”且是问句时直接判为点名；其余命中句交给 Gemini 区分点名/追问/仅提及（真实 API 8/8 正确，单次 2–4 s，偶见 29 s），3 s 超时或出错退回本地规则。
+- 追问窗口：Agent 回答后 `[agent] followup_seconds`（默认 25 s）内，问句无需再点名。
+- 外放回声：Agent 说话且无人插话时向 Live 上行发送静音（半双工），避免 Live 把回声当插话；本地插话需超过 `[live] barge_in_threshold` 持续 `barge_in_ms`（默认 200 ms）；`meetagent calibrate-echo [--write]` 播放测试声测量延迟、离线选择最佳 `aec_delay_ms`、按 AEC 后残余回声 p95 的 2 倍推荐门限。**未在扬声器上实测**：需用户以开会音量运行校准后验证。
+- 未做：按 P1 spike 选择 Live 模式（spike 仍待用户设备执行）。
+
+**P2 第二轮（2026-10-08）**：真实会议 AEC 诊断（`MEETAGENT_AEC_DEBUG=1` 保存 raw/reference/output）显示回声与参考始终对齐（70 ms），被打断的原因是持续 200 ms 的残余回声约 0.021，刚好高于门限 0.02；AEC 效果在不同运行间波动很大（同一音量所需门限 0.028 与 0.078）。校准改为用 Gemini 真实语音样本（合成噪声无法复现扬声器失真）、每级音量播放两次取最差、门限下限 0.04，并可选 `[live] playback_gain` 降低 Agent 音量；本机结果为原音量、门限 0.042。按用户要求默认回答方式改为文字，回答实时写入 `meeting-…agent.md`；Gemini key 改由 `keystore.py` 从系统钥匙环读取（Omarchy 的 ~/.bashrc 对非交互 shell 提前返回，状态栏启动的服务拿不到 export 的 key），并可在插件面板中验证后保存。
+
 **P3 举手机制**：每次发言轮次结束后，后台根据 MeetingState 评估“是否有值得说的内容”（事实错误、遗漏的相关研究、逻辑矛盾、被忽略的问题），按置信度、新颖度和频率上限（默认每 5 分钟最多 1 次）打分；超过阈值则举手：Omarchy 插件/GUI 显示待发言卡片并可选轻提示音，人说“请讲/go ahead/bitte”或点击后才播报，忽略则过期撤回。所有举手记录写入 findings 和纪要。
 
 **P4 线上会议声音通路**：PipeWire 虚拟麦克风把 Agent 语音送进 Zoom/Meet 等会议软件；采集系统音频（monitor source）与麦克风混合（ADR-008）；macOS 对应方案另行 spike。

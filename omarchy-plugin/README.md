@@ -8,6 +8,7 @@
 - 弹出面板可以设置输出目录和转写语言（自动、中文、英语、德语）。
 - 默认只做本地录音和转写。
 - 回答方式可切换：语音（需戴耳机，外放时回声会打断 Agent）或文字（不连接 Gemini Live、不上传会议音频，回答显示在面板“Agent 最近回答”和逐字稿中）。默认值读取 `~/.config/meetagent/config.toml` 的 `[live] reply`。
+- Gemini API key 可直接在面板中粘贴保存：服务先向 Gemini 验证，再存入系统钥匙环（libsecret，`service=gemini user=meetagent`），不会写入 shell.json 或任何明文文件。服务启动时自动从钥匙环读取 key，因此从状态栏启动的服务和终端行为一致。
 - Gemini Live 需要单独打开，并勾选整场音频上传同意。
 - 会后纪要上传有独立同意项，默认关闭。
 - 停止会议时调用本机 GUI 的停止接口，让音频和逐字稿正常收尾。

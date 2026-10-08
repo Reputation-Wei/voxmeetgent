@@ -1,5 +1,17 @@
 # Changelog
 
+## Phase 8 P2 — 2026-10-01
+
+### 已完成
+
+- 可配置的 Agent 名字，同时作为 Whisper 词汇提示，修正中文模式把 “Agent” 识别为 “A阵盾”。
+- 两级称呼识别（本地粗筛 + Gemini 区分点名/追问/提及，3 s 超时退回规则）与 25 s 追问窗口。
+- 外放回声：Live 上行半双工、持续时长判定的插话门限、`meetagent calibrate-echo` 校准命令。
+
+### 需要用户实测
+
+- 以开会音量运行 `meetagent calibrate-echo --write` 后，不戴耳机用语音模式验证 Agent 不再被自己的声音打断。
+
 ## Phase 8 P1 — 2026-10-01
 
 ### 已完成

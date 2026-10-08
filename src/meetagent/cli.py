@@ -30,6 +30,11 @@ console = Console()
 @app.callback()
 def main() -> None:
     """Run a MeetAgent command."""
+    # Load the Gemini key from the system keyring when the environment has none,
+    # so commands started from the bar plugin behave like the terminal.
+    from meetagent.keystore import ensure_api_key_env
+
+    ensure_api_key_env()
 
 
 @gui_app.callback(invoke_without_command=True)
@@ -49,6 +54,66 @@ def gui(
     if not no_open:
         webbrowser.open(url)
     uvicorn.run(create_app(), host="127.0.0.1", port=port, log_level="warning")
+
+
+@app.command("follow")
+def follow(port: int = typer.Option(8765, "--port", help="本机 MeetAgent 服务端口")) -> None:
+    """实时显示正在进行的会议：带说话人的转写和 Agent 的文字回答。"""
+    from meetagent.ui.follow import run_follow
+
+    try:
+        run_follow(port)
+    except KeyboardInterrupt:
+        pass
+
+
+@app.command("calibrate-echo")
+def calibrate_echo(
+    write: bool = typer.Option(False, "--write", help="把推荐值写入 ~/.config/meetagent/config.toml"),
+) -> None:
+    """用扬声器播放一段 Agent 语音并录音，找出回声能被消除的最大音量，并推荐插话门限。"""
+    from dataclasses import replace as replace_field
+
+    from meetagent.audio.calibrate import analyze, choose_playback_gain, record_calibration, write_config
+
+    config = AppConfig.load()
+    threshold = config.live.rms_threshold
+    console.print("请把系统音量调到开会时的音量，保持安静、不要碰键盘。"
+                  "将用逐级降低的音量把一段 3 秒语音各播放两次，然后录 1.5 秒环境噪声…")
+    levels, noise = record_calibration(delay_ms=config.audio.aec_delay_ms, threshold=threshold)
+    gain, needed, results = choose_playback_gain(levels, config.audio.aec_delay_ms, threshold)
+    for level_gain, level_needed in results:
+        verdict = "✓" if level_needed <= 0.06 else "✗（回声太强，插话门限会过高）"
+        console.print(f"  Agent 音量 ×{level_gain}: 需要插话门限 {level_needed} {verdict}")
+    chosen = next((level for level in levels if level[0] == gain), levels[-1])
+    result = analyze(
+        chosen[1], chosen[2], noise, rms_threshold=threshold,
+        current_delay_ms=config.audio.aec_delay_ms,
+    )
+    result = replace_field(
+        result, playback_gain=gain or levels[-1][0], levels=results,
+        recommended_barge_in=max(needed or result.recommended_barge_in, round(3 * result.noise_floor_rms, 3)),
+    )
+    if gain is None:
+        result.problems.append("即使最低音量回声也无法消除；请降低系统音量后重测，或戴耳机")
+    console.print(f"环境噪声 RMS：{result.noise_floor_rms:.4f}")
+    console.print(f"未消除回声 RMS：{result.raw_echo_rms:.4f}（播放→麦克风延迟约 {result.measured_delay_ms:.0f} ms）")
+    if result.residual_echo_p95 is not None:
+        console.print(
+            f"AEC 后残余回声 p95：{result.residual_echo_p95:.4f}（aec_delay_ms = {result.best_aec_delay_ms}）"
+        )
+    console.print(f"推荐 Agent 音量 playback_gain = {result.playback_gain}，插话门限 barge_in_threshold = {result.recommended_barge_in}")
+    path = Path.home() / ".config" / "meetagent" / "config.toml"
+    if result.problems:
+        for problem in result.problems:
+            console.print(f"[red]测量无效：{problem}[/red]")
+        console.print("[red]未写入配置。[/red]")
+        raise typer.Exit(1)
+    if write:
+        write_config(path, result)
+        console.print(f"已写入 {path}")
+    else:
+        console.print("加 --write 可写入配置文件。")
 
 
 @app.command("doctor")

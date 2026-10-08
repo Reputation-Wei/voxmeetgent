@@ -75,7 +75,7 @@ def test_live_updates_advance_cursor() -> None:
 
 
 def test_policy_paths() -> None:
-    normal = InterventionPolicy(LiveConfig())
+    normal = InterventionPolicy(LiveConfig(reply="voice"))
     assert normal.may_speak("call")
     assert normal.may_speak("keyword")
     assert not normal.may_speak("hand_raise")
@@ -133,7 +133,7 @@ def test_keyword_runs_in_background_and_speaks_without_name_call(tmp_path: Path,
         await demo._process_audio(
             np.zeros(16_000, dtype=np.float32), 590.0, entries, [], demo._load_keywords(),
             __import__("time").time() - 600, transcript_path, "zh",
-            analyst=analyst, policy=InterventionPolicy(LiveConfig()),
+            analyst=analyst, policy=InterventionPolicy(LiveConfig(reply="voice")),
             meeting_state=state, trigger_tasks=tasks,
         )
         # ASR returned while the analysis is still running in the background.
@@ -290,3 +290,13 @@ def test_service_reports_latest_agent_answer(tmp_path: Path) -> None:
     path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
     assert MeetingService._last_agent_entry(path)["text"] == "约 1400 万张"
     assert MeetingService._last_agent_entry(tmp_path / "missing.jsonl") is None
+
+
+def test_agent_answers_are_appended_to_markdown(tmp_path: Path) -> None:
+    path = tmp_path / "meeting-1.agent.md"
+    demo._append_agent_markdown(path, 65, "ask", "助手你怎么看", "约 1400 万张。", ["https://a.org/x"], ["a.org"])
+    demo._append_agent_markdown(path, 130, "summarize", "总结一下", "### 议题\n- ImageNet", [], [])
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("# Agent 回答 · meeting-1")
+    assert "## [01:05] 回答提问" in text and "> 助手你怎么看" in text and "- [a.org](https://a.org/x)" in text
+    assert "## [02:10] 讨论总结" in text and text.count("# Agent 回答") == 1
