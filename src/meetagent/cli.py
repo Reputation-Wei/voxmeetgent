@@ -239,14 +239,28 @@ def enroll(
 def speaker_correct(
     transcript: Path = typer.Option(..., "--transcript", exists=True, dir_okay=False,
                                     help="会议 .txt 文件；对应 .jsonl 也必须存在"),
-    time_seconds: float = typer.Option(..., "--time", min=0,
-                                       help="JSONL timestamp 秒数；可从 JSONL 的 timestamp 字段复制"),
+    time_seconds: float | None = typer.Option(None, "--time", min=0,
+                                              help="JSONL timestamp 秒数；修正单条发言时使用"),
     name: str = typer.Option(..., "--name", help="正确说话人姓名或 Speaker N"),
+    from_speaker: str | None = typer.Option(None, "--from-speaker",
+                                            help="要全场批量重命名的原说话人标签，如 Speaker 1"),
 ) -> None:
-    """修正最近的一条说话人标注，并同步更新 TXT/JSONL。"""
+    """修正说话人标注：支持按时间戳单条修正（--time）或整场批量重命名（--from-speaker）。"""
     path = transcript.expanduser()
+    store = JsonlTranscriptStore(path)
+    if from_speaker:
+        try:
+            count = store.rename_speaker(from_speaker, name)
+        except Exception as exc:
+            console.print(f"[red]错误：{exc}[/red]")
+            raise typer.Exit(1) from exc
+        console.print(f"已将全场共 {count} 条发言的说话人从“{from_speaker}”重命名为“{name}”；TXT 与 JSONL 已同步更新。")
+        return
+    if time_seconds is None:
+        console.print("[red]错误：单条修正必须提供 --time 秒数；或提供 --from-speaker 进行批量重命名。[/red]")
+        raise typer.Exit(2)
     try:
-        entry = JsonlTranscriptStore(path).correct_speaker(time_seconds, name)
+        entry = store.correct_speaker(time_seconds, name)
     except Exception as exc:
         console.print(f"[red]错误：{exc}[/red]")
         raise typer.Exit(1) from exc
@@ -254,3 +268,4 @@ def speaker_correct(
         f"已将 [{entry['time']}] {entry['text']} 的说话人从“{entry.get('speaker_original')}”"
         f"修正为“{entry['speaker']}”；TXT 与 JSONL 已同步更新。"
     )
+

@@ -1101,6 +1101,14 @@ async def _process_audio(
                                 old_entry["speaker_confidence"] = "retrospectively_confirmed"
                                 _rewrite_transcript_files(transcript_path, entries)
                                 break
+            elif len(audio) < 16_000 and entries:
+                # Fast context continuity for short conversational turns (< 1.0s)
+                last_entry = entries[-1]
+                last_spk = last_entry.get("speaker")
+                if last_spk and last_spk not in ("说话人未知", "Agent"):
+                    if 0.0 <= (now - float(last_entry.get("timestamp", 0.0))) <= 1.2:
+                        speaker = last_spk
+                        speaker_confirmed = False
         except Exception as exc:
             console.print(f"[yellow]本段说话人识别失败，先标记为 Speaker：{exc}[/yellow]")
     entry = {
@@ -1113,8 +1121,12 @@ async def _process_audio(
         "language_mode": language,
         "source": "local_asr",
         "asr_confidence": "filtered_whisper_segment",
-        "speaker_confidence": "voice_embedding_confirmed" if speaker_confirmed else "unknown",
+        "speaker_confidence": (
+            "voice_embedding_confirmed" if speaker_confirmed
+            else ("context_continuity" if speaker != "说话人未知" else "unknown")
+        ),
     }
+
     _store_local_utterance(entry, entries, transcript_path)
     shown_language = detected_language if language == "auto" else f"{language}, detected {detected_language}"
     console.print(
@@ -1202,6 +1214,16 @@ async def _run_file(
             speaker_identifier=speaker_identifier, analyst=analyst, policy=policy,
             live_calls=live_calls, meeting_state=meeting_state,
         )
+    if speaker_identifier is not None and hasattr(speaker_identifier, "recluster_session"):
+        recluster_info = speaker_identifier.recluster_session(entries, meeting_started=meeting_started)
+        if recluster_info.get("merged_speakers") or recluster_info.get("resolved_unknowns"):
+            _rewrite_transcript_files(transcript_path, entries)
+            console.print(
+                f"[dim]会后说话人优化完成：合并 {recluster_info.get('merged_speakers')} 个重叠说话人，"
+                f"补全 {recluster_info.get('resolved_unknowns')} 条短句，"
+                f"最终共 {len(recluster_info.get('final_speakers', []))} 位发言人。[/dim]"
+            )
+
 
 
 async def run_local_transcription(file: Path, out: Path, language: str = "auto") -> tuple[Path, Path]:
@@ -1510,6 +1532,16 @@ async def _run_microphone(
                     )
                     pending = []
                     speech_start = None
+                if speaker_identifier is not None and hasattr(speaker_identifier, "recluster_session"):
+                    recluster_info = speaker_identifier.recluster_session(entries, meeting_started=meeting_started)
+                    if recluster_info.get("merged_speakers") or recluster_info.get("resolved_unknowns"):
+                        _rewrite_transcript_files(transcript_path, entries)
+                        console.print(
+                            f"[dim]会后说话人优化完成：合并 {recluster_info.get('merged_speakers')} 个重叠说话人，"
+                            f"补全 {recluster_info.get('resolved_unknowns')} 条短句，"
+                            f"最终共 {len(recluster_info.get('final_speakers', []))} 位发言人。[/dim]"
+                        )
+
                 if claim_analysis_task is not None:
                     claim_analysis_task.cancel()
                     await asyncio.gather(claim_analysis_task, return_exceptions=True)

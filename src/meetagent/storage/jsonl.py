@@ -70,3 +70,26 @@ class JsonlTranscriptStore:
         target["speaker_original"] = old_speaker
         self.rewrite(entries)
         return target
+
+    def rename_speaker(self, old_speaker: str, new_speaker: str) -> int:
+        """Rename all occurrences of old_speaker to new_speaker in paired TXT/JSONL exports."""
+        old_speaker = old_speaker.strip()
+        new_speaker = new_speaker.strip()
+        if not old_speaker or not new_speaker:
+            raise ValueError("说话人名称不能为空。")
+        entries = [
+            json.loads(line)
+            for line in self.jsonl_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        count = 0
+        for entry in entries:
+            if entry.get("speaker") == old_speaker:
+                entry["speaker"] = new_speaker
+                entry["speaker_corrected"] = True
+                entry["speaker_original"] = old_speaker
+                count += 1
+        if count > 0:
+            self.rewrite(entries)
+        return count
+

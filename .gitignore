@@ -31,3 +31,6 @@ Meetings/
 .DS_Store
 .idea/
 .vscode/
+:memory:.ses
+retranscriptions/
+
